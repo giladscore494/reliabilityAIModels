@@ -30,7 +30,7 @@ if not GEMINI_API_KEY or not GITHUB_TOKEN or not GITHUB_REPO:
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.5-flash")
 
 # -----------------------------------------------------------
 # טעינת מילון יצרנים ודגמים
