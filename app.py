@@ -186,6 +186,7 @@ if st.button("בדוק אמינות"):
     חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
     החזר JSON בלבד עם הנתונים הבאים:
    **You must perform an internet search for information sources for the parameters I requested.**
+   **You must perform an internet search for repair prices in Israel and Hebrew sources. You can also search for information about faults from international sources, but repair prices are only from Israel.**
 
     {{
         "search_performed": true או false,
