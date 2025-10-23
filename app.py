@@ -185,6 +185,7 @@ if st.button("בדוק אמינות"):
     אתה מומחה לאמינות רכבים בישראל עם גישה לחיפוש אינטרנטי.
     חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
     החזר JSON בלבד עם הנתונים הבאים:
+   **You must perform an internet search for information sources for the parameters I requested.**
 
     {{
         "search_performed": true או false,
