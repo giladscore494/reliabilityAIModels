@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 🇮🇱 Car Reliability Analyzer v1.3
-# בדיקת אמינות רכב לפי יצרן, דגם ושנתון עם חיפוש אינטרנטי
-# כולל עדכון מילון אוטומטי ושמירה ל-GitHub
+# 🇮🇱 Car Reliability Analyzer v1.4
+# ניתוח אמינות רכב לפי יצרן, דגם ושנתון עם חיפוש אינטרנטי
+# כולל:
+# - Cache של 45 יום (לא שולח שוב לאותו רכב)
+# - עדכון מילון אוטומטי
+# - שמירה ל־GitHub (CSV + Dict)
+# - הגבלת בקשות יומית (1000 כלליות / 5 למשתמש)
 # ===========================================================
 
-import os, json, re, datetime
+import os, json, re, uuid, datetime
 import pandas as pd
 import streamlit as st
 from github import Github
@@ -33,53 +37,56 @@ genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
 # -----------------------------------------------------------
+# זיהוי משתמש (UUID)
+# -----------------------------------------------------------
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = str(uuid.uuid4())
+user_id = st.session_state["user_id"]
+
+# -----------------------------------------------------------
 # טעינת מילון יצרנים ודגמים
 # -----------------------------------------------------------
 from car_models_dict import israeli_car_market_full_compilation
 
 # -----------------------------------------------------------
-# פונקציה לשמירה ל-GitHub (CSV)
+# הגדרות קובץ GitHub
 # -----------------------------------------------------------
-def append_to_github_csv(make, model_name, year, base_score, avg_cost, issues, search_performed):
-    try:
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(GITHUB_REPO)
-        file_path = "reliability_results.csv"
-
-        try:
-            contents = repo.get_contents(file_path)
-            df = pd.read_csv(contents.download_url)
-        except Exception:
-            df = pd.DataFrame(columns=[
-                "date", "make", "model", "year", "base_score",
-                "avg_cost", "issues", "search_performed"
-            ])
-
-        new_entry = {
-            "date": datetime.date.today().isoformat(),
-            "make": make,
-            "model": model_name,
-            "year": year,
-            "base_score": base_score,
-            "avg_cost": avg_cost,
-            "issues": "; ".join(issues) if isinstance(issues, list) else str(issues),
-            "search_performed": search_performed
-        }
-
-        df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
-        csv_data = df.to_csv(index=False)
-
-        try:
-            repo.update_file(file_path, "update reliability results", csv_data, contents.sha)
-        except Exception:
-            repo.create_file(file_path, "create reliability results", csv_data)
-
-        st.success("✅ הנתונים נשמרו ל־GitHub בהצלחה.")
-    except Exception as e:
-        st.warning(f"⚠️ לא ניתן לשמור ל־GitHub: {e}")
+g = Github(GITHUB_TOKEN)
+repo = g.get_repo(GITHUB_REPO)
+csv_path = "reliability_results.csv"
 
 # -----------------------------------------------------------
-# ממשק משתמש חכם – בחירת יצרן ודגם
+# טעינת / יצירת קובץ CSV
+# -----------------------------------------------------------
+try:
+    contents = repo.get_contents(csv_path)
+    df = pd.read_csv(contents.download_url)
+except Exception:
+    df = pd.DataFrame(columns=[
+        "date", "user_id", "make", "model", "year",
+        "base_score", "avg_cost", "issues", "search_performed"
+    ])
+    repo.create_file(csv_path, "init reliability results", df.to_csv(index=False))
+
+# -----------------------------------------------------------
+# מגבלות יומיות
+# -----------------------------------------------------------
+today = datetime.date.today().isoformat()
+daily_limit_global = 1000
+daily_limit_user = 5
+
+today_df = df[df["date"] == today]
+if len(today_df) >= daily_limit_global:
+    st.error("🚫 הגעת למכסה היומית של 1000 בקשות. נסה שוב מחר.")
+    st.stop()
+
+user_today_df = today_df[today_df["user_id"] == user_id]
+if len(user_today_df) >= daily_limit_user:
+    st.warning("⚠️ הגעת למכסה האישית (5 בקשות ליום). נסה שוב מחר.")
+    st.stop()
+
+# -----------------------------------------------------------
+# ממשק משתמש – בחירת יצרן ודגם
 # -----------------------------------------------------------
 make_list = sorted(israeli_car_market_full_compilation.keys())
 st.markdown("### 🔍 בחר יצרן ודגם לבדיקה")
@@ -106,6 +113,19 @@ else:
 year = st.number_input("שנת ייצור:", min_value=2000, max_value=2025, step=1)
 
 # -----------------------------------------------------------
+# Cache – בדיקה אם יש תוצאה עדכנית (≤45 יום)
+# -----------------------------------------------------------
+def get_cached(make, model, year):
+    window = datetime.date.today() - datetime.timedelta(days=45)
+    cached = df[
+        (df["make"].str.lower() == make.lower()) &
+        (df["model"].str.lower() == model.lower()) &
+        (df["year"] == year) &
+        (pd.to_datetime(df["date"]) >= pd.Timestamp(window))
+    ]
+    return cached.iloc[-1] if not cached.empty else None
+
+# -----------------------------------------------------------
 # הפעלת בדיקה
 # -----------------------------------------------------------
 if st.button("בדוק אמינות"):
@@ -113,6 +133,21 @@ if st.button("בדוק אמינות"):
         st.error("יש להזין שם חברה ודגם תקינים.")
         st.stop()
 
+    cached_row = get_cached(selected_make, selected_model, year)
+    if cached_row is not None:
+        st.success(f"⚡ נמצאה תוצאה ממאגר ({cached_row['date']}) – לא נשלחה בקשה חדשה.")
+        st.subheader(f"ציון אמינות: {cached_row['base_score']}/100")
+        st.write(f"עלות ממוצעת: ₪{cached_row['avg_cost']}")
+        st.markdown("**🔧 תקלות נפוצות:**")
+        for issue in cached_row["issues"].split("; "):
+            st.markdown(f"- {issue}")
+        if cached_row["search_performed"]:
+            st.info("🌐 בוצע חיפוש אינטרנטי בזמן יצירת הנתון.")
+        st.stop()
+
+    # -------------------------------------------------------
+    # יצירת Prompt חכם
+    # -------------------------------------------------------
     st.info(f"מתבצעת בדיקת אמינות עבור {selected_make} {selected_model} ({year})...")
 
     prompt = f"""
@@ -157,7 +192,7 @@ if st.button("בדוק אמינות"):
         response = model.generate_content(prompt)
         text = response.text.strip()
         json_text = re.search(r"\{.*\}", text, re.DOTALL).group()
-        parsed = json.loads(json_text)
+        parsed = json.loads(repair_json(json_text))
 
         base_score = parsed.get("base_score", 0)
         issues = parsed.get("common_issues", [])
@@ -166,6 +201,9 @@ if st.button("בדוק אמינות"):
         summary = parsed.get("reliability_summary", "אין מידע.")
         detailed_costs = parsed.get("issues_with_costs", [])
 
+        # -------------------------------------------------------
+        # הצגת תוצאות
+        # -------------------------------------------------------
         if search_flag:
             st.success("🌐 בוצע חיפוש אינטרנטי בזמן אמת למידע עדכני בישראל.")
         else:
@@ -190,31 +228,46 @@ if st.button("בדוק אמינות"):
         if avg_cost > 0:
             st.info(f"עלות תחזוקה ממוצעת כוללת: כ־{avg_cost:,.0f} ₪")
 
-        # עדכון מילון אם מדובר בחברה/דגם חדשים
+        # -------------------------------------------------------
+        # שמירת נתונים
+        # -------------------------------------------------------
+        new_entry = {
+            "date": today,
+            "user_id": user_id,
+            "make": selected_make,
+            "model": selected_model,
+            "year": year,
+            "base_score": base_score,
+            "avg_cost": avg_cost,
+            "issues": "; ".join(issues) if isinstance(issues, list) else str(issues),
+            "search_performed": search_flag
+        }
+
+        df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
+        csv_data = df.to_csv(index=False)
+        try:
+            repo.update_file(csv_path, "update reliability results", csv_data, contents.sha)
+        except Exception:
+            repo.create_file(csv_path, "create reliability results", csv_data)
+
+        # -------------------------------------------------------
+        # עדכון מילון
+        # -------------------------------------------------------
         if selected_make not in israeli_car_market_full_compilation:
             israeli_car_market_full_compilation[selected_make] = [selected_model]
         elif selected_model not in israeli_car_market_full_compilation[selected_make]:
             israeli_car_market_full_compilation[selected_make].append(selected_model)
 
-        # שמירת תוצאות החיפוש
-        append_to_github_csv(selected_make, selected_model, year, base_score, avg_cost, issues, search_flag)
-
-        # שמירת מילון מעודכן
+        dict_file = "car_models_dict.py"
+        content = "israeli_car_market_full_compilation = " + json.dumps(
+            israeli_car_market_full_compilation, ensure_ascii=False, indent=4
+        )
         try:
-            g = Github(GITHUB_TOKEN)
-            repo = g.get_repo(GITHUB_REPO)
-            dict_file = "car_models_dict.py"
-            content = "israeli_car_market_full_compilation = " + json.dumps(
-                israeli_car_market_full_compilation, ensure_ascii=False, indent=4
-            )
-            try:
-                existing = repo.get_contents(dict_file)
-                repo.update_file(dict_file, "auto-update car models", content, existing.sha)
-            except Exception:
-                repo.create_file(dict_file, "create car models dict", content)
-            st.info("📁 המילון עודכן אוטומטית ב־GitHub.")
-        except Exception as e:
-            st.warning(f"⚠️ עדכון המילון נכשל: {e}")
+            existing = repo.get_contents(dict_file)
+            repo.update_file(dict_file, "auto-update car models", content, existing.sha)
+        except Exception:
+            repo.create_file(dict_file, "create car models dict", content)
+        st.info("📁 המילון עודכן ב־GitHub בהצלחה.")
 
     except Exception as e:
         st.error(f"שגיאה בעיבוד הבקשה: {e}")
