@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 🇮🇱 Car Reliability Analyzer v1.5.0
+# 🇮🇱 Car Reliability Analyzer v1.5.1
 # בדיקת אמינות רכב לפי יצרן, דגם ושנתון
 # כולל מילון דינמי, חיפוש אינטרנטי, Cache, והגבלת בקשות יומית
 # ===========================================================
@@ -131,27 +131,53 @@ def check_daily_limit():
         return True, 0  # אם אין קובץ עדיין – לא לחסום
 
 # -----------------------------------------------------------
-# ממשק בחירת יצרן/דגם – כולל הקלדה חופשית
+# ממשק בחירת יצרן / דגם / שנתון – כולל טווח מהמילון והזנה חופשית
 # -----------------------------------------------------------
 make_list = sorted(israeli_car_market_full_compilation.keys())
-st.markdown("### 🔍 בחר יצרן ודגם לבדיקה")
+st.markdown("### 🔍 בחר יצרן, דגם ושנתון לבדיקה")
 
-make_input = st.text_input("הקלד יצרן (או בחר מהרשימה):")
-make_choice = st.selectbox("או בחר יצרן מהרשימה:", ["בחר..."] + make_list)
-selected_make = make_input.strip() if make_input else (make_choice if make_choice != "בחר..." else "")
-selected_model = ""
+# --- בחירת יצרן ---
+make_choice = st.selectbox("בחר יצרן מהרשימה:", ["בחר..."] + make_list)
+make_input = st.text_input("או הזן ידנית שם יצרן (אם אינו מופיע):")
 
+if make_choice != "בחר...":
+    selected_make = make_choice
+elif make_input.strip():
+    selected_make = make_input.strip()
+else:
+    selected_make = ""
+
+# --- בחירת דגם ---
 if selected_make in israeli_car_market_full_compilation:
     models = israeli_car_market_full_compilation[selected_make]
-    model_input = st.text_input(f"או הקלד דגם של {selected_make}:")
-    model_choice = st.selectbox(f"או בחר דגם של {selected_make}:", ["בחר דגם..."] + models)
-    selected_model = model_input.strip() if model_input else (model_choice if model_choice != "בחר דגם..." else "")
+    model_choice = st.selectbox(f"בחר דגם של {selected_make}:", ["בחר דגם..."] + models)
+    model_input = st.text_input("או הזן דגם ידנית:")
+    if model_choice != "בחר דגם...":
+        selected_model = model_choice
+    elif model_input.strip():
+        selected_model = model_input.strip()
+    else:
+        selected_model = ""
 else:
-    st.warning("שם החברה לא מופיע במערכת. יש להזין ידנית:")
+    st.warning("📋 יצרן זה אינו מופיע במערכת. יש להזין ידנית.")
     selected_make = st.text_input("שם חברה:")
     selected_model = st.text_input("שם דגם:")
 
-year = st.number_input("שנת ייצור:", min_value=2000, max_value=2025, step=1)
+# --- בחירת שנתון ---
+year_range = []
+if selected_make in israeli_car_market_full_compilation and selected_model:
+    model_entry = next((m for m in israeli_car_market_full_compilation[selected_make] if selected_model in m), "")
+    match = re.search(r"\((\d{4})(?:-(\d{4})|\-)\)", model_entry)
+    if match:
+        start, end = match.groups()
+        end = end or "2025"
+        year_range = list(range(int(start), int(end) + 1))
+
+if year_range:
+    year_label = f"בחר שנת ייצור (טווח: {min(year_range)}–{max(year_range)} לפי המילון):"
+    year = st.number_input(year_label, min_value=min(year_range), max_value=max(year_range), step=1)
+else:
+    year = st.number_input("הזן שנת ייצור ידנית:", min_value=1960, max_value=2025, step=1)
 
 # -----------------------------------------------------------
 # הפעלת בדיקה
