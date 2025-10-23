@@ -1,4 +1,4 @@
-israeli_car_market_final_version = {
+israeli_car_market_full_compilation = {
     # == מותגים עממיים ==
     "Toyota": [
         "Yaris (1999-2025)", "Corolla (1966-2025)", "Auris (2006-2018)", "Camry (1982-2025)", "Prius (1997-2025)", "C-HR (2016-2025)",
