@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 🇮🇱 Car Reliability Analyzer v1.5.1
+# 🇮🇱 Car Reliability Analyzer v1.6.0
 # בדיקת אמינות רכב לפי יצרן, דגם ושנתון
-# כולל מילון דינמי, חיפוש אינטרנטי, Cache, והגבלת בקשות יומית
+# כולל מילון דינמי, חיפוש אינטרנטי, Cache חכם, והגבלת בקשות יומית
 # ===========================================================
 
 import os, json, re, datetime
@@ -52,24 +52,38 @@ def get_cached(make, model, year):
         contents = repo.get_contents(csv_path)
         df = pd.read_csv(contents.download_url)
 
+        # ניקוי נתונים
         for col in ["make", "model"]:
-            df[col] = df[col].astype(str).fillna("").str.strip()
+            df[col] = (
+                df[col]
+                .astype(str)
+                .fillna("")
+                .str.strip()
+                .str.lower()
+                .str.replace(r"\(.*?\)", "", regex=True)
+            )
         df["year"] = pd.to_numeric(df["year"], errors="coerce").fillna(0).astype(int)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+        # ניקוי ערכי הקלט
+        make_clean = re.sub(r"\(.*?\)", "", make).strip().lower()
+        model_clean = re.sub(r"\(.*?\)", "", model).strip().lower()
 
         cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=45)
         recent_df = df[df["date"] >= cutoff_date]
 
+        # חיפוש התאמה
         match = recent_df[
-            (recent_df["make"].str.lower() == make.lower()) &
-            (recent_df["model"].str.lower() == model.lower()) &
+            (recent_df["make"].str.contains(make_clean, na=False)) &
+            (recent_df["model"].str.contains(model_clean, na=False)) &
             (recent_df["year"] == int(year))
         ]
 
         if not match.empty:
             return match.iloc[-1].to_dict()
         return None
-    except Exception:
+    except Exception as e:
+        st.warning(f"שגיאה בקריאת ה-cache: {e}")
         return None
 
 # -----------------------------------------------------------
@@ -131,53 +145,27 @@ def check_daily_limit():
         return True, 0  # אם אין קובץ עדיין – לא לחסום
 
 # -----------------------------------------------------------
-# ממשק בחירת יצרן / דגם / שנתון – כולל טווח מהמילון והזנה חופשית
+# ממשק בחירת יצרן/דגם – כולל הקלדה חופשית
 # -----------------------------------------------------------
 make_list = sorted(israeli_car_market_full_compilation.keys())
-st.markdown("### 🔍 בחר יצרן, דגם ושנתון לבדיקה")
+st.markdown("### 🔍 בחר יצרן ודגם לבדיקה")
 
-# --- בחירת יצרן ---
-make_choice = st.selectbox("בחר יצרן מהרשימה:", ["בחר..."] + make_list)
-make_input = st.text_input("או הזן ידנית שם יצרן (אם אינו מופיע):")
+make_input = st.text_input("הקלד יצרן (או בחר מהרשימה):")
+make_choice = st.selectbox("או בחר יצרן מהרשימה:", ["בחר..."] + make_list)
+selected_make = make_input.strip() if make_input else (make_choice if make_choice != "בחר..." else "")
+selected_model = ""
 
-if make_choice != "בחר...":
-    selected_make = make_choice
-elif make_input.strip():
-    selected_make = make_input.strip()
-else:
-    selected_make = ""
-
-# --- בחירת דגם ---
 if selected_make in israeli_car_market_full_compilation:
     models = israeli_car_market_full_compilation[selected_make]
-    model_choice = st.selectbox(f"בחר דגם של {selected_make}:", ["בחר דגם..."] + models)
-    model_input = st.text_input("או הזן דגם ידנית:")
-    if model_choice != "בחר דגם...":
-        selected_model = model_choice
-    elif model_input.strip():
-        selected_model = model_input.strip()
-    else:
-        selected_model = ""
+    model_input = st.text_input(f"או הקלד דגם של {selected_make}:")
+    model_choice = st.selectbox(f"או בחר דגם של {selected_make}:", ["בחר דגם..."] + models)
+    selected_model = model_input.strip() if model_input else (model_choice if model_choice != "בחר דגם..." else "")
 else:
-    st.warning("📋 יצרן זה אינו מופיע במערכת. יש להזין ידנית.")
+    st.warning("שם החברה לא מופיע במערכת. יש להזין ידנית:")
     selected_make = st.text_input("שם חברה:")
     selected_model = st.text_input("שם דגם:")
 
-# --- בחירת שנתון ---
-year_range = []
-if selected_make in israeli_car_market_full_compilation and selected_model:
-    model_entry = next((m for m in israeli_car_market_full_compilation[selected_make] if selected_model in m), "")
-    match = re.search(r"\((\d{4})(?:-(\d{4})|\-)\)", model_entry)
-    if match:
-        start, end = match.groups()
-        end = end or "2025"
-        year_range = list(range(int(start), int(end) + 1))
-
-if year_range:
-    year_label = f"בחר שנת ייצור (טווח: {min(year_range)}–{max(year_range)} לפי המילון):"
-    year = st.number_input(year_label, min_value=min(year_range), max_value=max(year_range), step=1)
-else:
-    year = st.number_input("הזן שנת ייצור ידנית:", min_value=1960, max_value=2025, step=1)
+year = st.number_input("שנת ייצור:", min_value=2000, max_value=2025, step=1)
 
 # -----------------------------------------------------------
 # הפעלת בדיקה
@@ -211,8 +199,8 @@ if st.button("בדוק אמינות"):
     אתה מומחה לאמינות רכבים בישראל עם גישה לחיפוש אינטרנטי.
     חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
     החזר JSON בלבד עם הנתונים הבאים:
-   **You must perform an internet search for information sources for the parameters I requested.**
-   **You must perform an internet search for repair prices in Israel and Hebrew sources. You can also search for information about faults from international sources, but repair prices are only from Israel.**
+    **You must perform an internet search for information sources for the parameters I requested.**
+    **You must perform an internet search for repair prices in Israel and Hebrew sources. You can also search for information about faults from international sources, but repair prices are only from Israel.**
 
     {{
         "search_performed": true או false,
@@ -271,6 +259,7 @@ if st.button("בדוק אמינות"):
 
         append_to_github_csv(user_id, selected_make, selected_model, year, base_score, avg_cost, issues, search_flag)
 
+        # עדכון מילון במידת הצורך
         if selected_make not in israeli_car_market_full_compilation:
             israeli_car_market_full_compilation[selected_make] = [selected_model]
         elif selected_model not in israeli_car_market_full_compilation[selected_make]:
