@@ -1,6 +1,5 @@
 streamlit
 pandas
+PyGithub
 google-generativeai
-python-dotenv
-requests
-pygithub
+json-repair
