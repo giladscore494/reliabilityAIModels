@@ -316,7 +316,8 @@ israeli_car_market_full_compilation = {
         "Laguna (1994-2015)",
         "Talisman (2015-2022)",
         "Zoe (2012-2025)",
-        "Twingo (1993-2025)"
+        "Twingo (1993-2025)",
+        "מדבר על דגם הדיזל 1.5 ליטר"
     ],
     "Seat": [
         "Ibiza (1984-2025)",
