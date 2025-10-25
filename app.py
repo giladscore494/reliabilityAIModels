@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-# Car Reliability Analyzer – Israel (v3.4.0)
+# Car Reliability Analyzer – Israel (v3.5.0)
 # Sheets + 45d Cache • No auth/signup • 30-char input limit
 # Free-text sub-model + A→B fallback (try sub-model; else model-only)
-# ✅ NEW: Mileage range input • Transparent score breakdown • Tabs UI
-# ✅ NEW: Cache & Sheets include mileage_range + score_breakdown + base_score_calculated
+# ✅ Mileage range input • Transparent score breakdown • Tabs UI
+# ✅ Cache & Sheets include mileage_range + score_breakdown + base_score_calculated
+# ✅ v3.5.0: No KeyError on mileage_range • Flexible mileage match (textual)
+# ✅ v3.5.0: Use cache even if mileage not matched BUT show clear warning
+# ✅ v3.5.0: Mileage-based score adjustment + notes (shown in summary + tab)
 
 import json, re, datetime, difflib, traceback
 import pandas as pd
@@ -133,7 +136,7 @@ def connect_sheet():
         sh = gc.open_by_key(GOOGLE_SHEET_ID)
         ws = sh.sheet1
 
-        # v3.4.0 headers (backward compatible additions)
+        # v3.4.0+ headers (backward compatible additions)
         headers = [
             "date","user_id","make","model","sub_model","year","fuel","transmission",
             "mileage_range",
@@ -162,11 +165,17 @@ def sheet_to_df() -> pd.DataFrame:
     ]
     try:
         recs = ws.get_all_records()
+        df = pd.DataFrame(recs) if recs else pd.DataFrame(columns=cols)
     except Exception as e:
         st.error("כשל בקריאת המאגר.")
         st.code(repr(e))
         return pd.DataFrame(columns=cols)
-    return pd.DataFrame(recs) if recs else pd.DataFrame(columns=cols)
+
+    # ✅ הבטחת עמודות חסרות לשורות היסטוריות (לא תקרה שגיאת KeyError)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    return df
 
 def append_row_to_sheet(row_dict: dict):
     order = [
@@ -190,12 +199,33 @@ def within_daily_global_limit(df: pd.DataFrame, limit=GLOBAL_DAILY_LIMIT):
     cnt = len(df[df.get("date","").astype(str) == today]) if not df.empty and "date" in df.columns else 0
     return (cnt < limit, cnt)
 
-# ---------- Cache (45d) + sub_model A→B + mileage ----------
-def match_hits(recent: pd.DataFrame, year: int, make: str, model: str, sub_model: str|None, mileage_range: str, th: float):
-    mk, md, sm = normalize_text(make), normalize_text(model), normalize_text(sub_model or "")
-    mr = normalize_text(mileage_range or "")
-    use_sub = len(sm) > 0
+# ---------- Mileage helpers (v3.5.0) ----------
+def mileage_adjustment(mileage_range: str):
+    """
+    מחזיר (delta, note_he) כאשר delta מצורף לציון המשוקלל (שלילי לרוב),
+    ו-note_he הוא טקסט הסבר בעברית להצגה למשתמש.
+    """
+    m = normalize_text(mileage_range or "")
+    if not m:
+        return 0, None
 
+    # מדיניות ענישה שקופה
+    if "200" in m and "+" in m:
+        return -15, "הציון הותאם מטה עקב קילומטראז׳ גבוה מאוד (200K+). מומלץ לשים דגש על גיר/מנוע/מערכות עזר."
+    if "150" in m and "200" in m:
+        return -10, "הציון הותאם מטה עקב קילומטראז׳ גבוה (150–200 אלף ק״מ)."
+    if "100" in m and "150" in m:
+        return -5, "הציון הותאם מעט מטה עקב קילומטראז׳ בינוני-גבוה (100–150 אלף ק״מ)."
+    # עד 100K – ללא ענישה
+    return 0, None
+
+def pretty_join(items):
+    return " • ".join([i for i in items if i])
+
+# ---------- Cache (45d) + sub_model A→B + flexible mileage ----------
+def match_hits_core(recent: pd.DataFrame, year: int, make: str, model: str, sub_model: str|None, th: float):
+    mk, md, sm = normalize_text(make), normalize_text(model), normalize_text(sub_model or "")
+    use_sub = len(sm) > 0
     cand = recent[
         (recent["year"].astype("Int64") == int(year)) &
         (recent["make"].apply(lambda x: similarity(x, mk) >= th)) &
@@ -203,19 +233,24 @@ def match_hits(recent: pd.DataFrame, year: int, make: str, model: str, sub_model
     ]
     if use_sub and "sub_model" in recent.columns:
         cand = cand[cand["sub_model"].apply(lambda x: similarity(x, sm) >= th)]
-    # mileage exact-ish match when column exists
-    if "mileage_range" in recent.columns and mr:
-        cand = cand[cand["mileage_range"].apply(lambda x: similarity(str(x), mr) >= 0.97)]
-
     if "date" in cand.columns:
-        return cand.sort_values("date")
-    else:
-        return cand
+        cand = cand.sort_values("date")
+    return cand
+
+def mileage_is_close(requested: str, stored: str, thr: float = 0.92) -> bool:
+    """התאמת ק״מ גמישה לפי דמיון טקסטואלי. מחזיר True אם מספיק קרוב."""
+    if requested is None or stored is None:
+        return False
+    return similarity(str(requested), str(stored)) >= thr
 
 def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mileage_range: str, max_days=45):
+    """
+    מחזיר: parsed_row, df, used_fallback, mileage_matched
+    mileage_matched=False -> נוסיף אזהרה למשתמש אבל עדיין נציג Cache
+    """
     df = sheet_to_df()
     if df.empty:
-        return None, df, False
+        return None, df, False, False
     try:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
@@ -225,19 +260,42 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mile
     recent = df[df["date"] >= cutoff] if "date" in df.columns else df
 
     used_fallback = False
+    mileage_matched = False
+
     hits = pd.DataFrame()
+    # שלב 1: חיפוש לפי make/model/(sub_model) — בלי מסנן ק״מ
     for th in (0.97, 0.93):
-        hits = match_hits(recent, year, make, model, sub_model, mileage_range, th)
+        hits = match_hits_core(recent, year, make, model, sub_model, th)
         if not hits.empty:
             break
+
+    # אם אין התאמות וביקשו sub_model → fallback לדגם בלבד
     if hits.empty and sub_model:
         used_fallback = True
         for th in (0.97, 0.93):
-            hits = match_hits(recent, year, make, model, None, mileage_range, th)
+            hits = match_hits_core(recent, year, make, model, None, th)
             if not hits.empty:
                 break
+
     if hits.empty:
-        return None, df, used_fallback
+        return None, df, used_fallback, mileage_matched
+
+    # שלב 2: נעדיף שורות עם mileage קרוב; אם אין – נשתמש בכל זאת ונציין אזהרה
+    req_mil = str(mileage_range or "")
+    # נשקלל התאמה לפי דמיון טקסטואלי על mileage_range (אם קיים בשורה)
+    def row_score(row):
+        stored = str(row.get("mileage_range", "") or "")
+        return similarity(req_mil, stored)
+
+    hits = hits.copy()
+    hits["__mil_sim"] = hits.apply(row_score, axis=1)
+    hits = hits.sort_values(["__mil_sim", "date"], ascending=[False, True])
+
+    best = hits.iloc[-1]  # הכי מאוחר כרונולוגית מבין הגבוהים? (מיון עולה של date); נעדכן:
+    # נעדיף תחילה הדומה ביותר בק״מ ואז התאריך העדכני
+    hits = hits.sort_values(["__mil_sim", "date"], ascending=[False, False])
+    best = hits.iloc[0]
+    mileage_matched = mileage_is_close(req_mil, best.get("mileage_range", ""))
 
     # Build a "parsed_data-like" object from cache (supports old rows without breakdown)
     def row_to_parsed(r: dict):
@@ -247,10 +305,8 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mile
         competitors = safe_json_parse(r.get("common_competitors_brief")) or []
         sources = safe_json_parse(r.get("sources")) or r.get("sources","")
 
-        # Back-compat: base_score_calculated may be empty in old rows; fallback to "base_score"
         base_calc = r.get("base_score_calculated")
         if base_calc in [None, "", "nan"]:
-            # legacy field name
             legacy_base = r.get("base_score")
             try:
                 base_calc = int(round(float(legacy_base)))
@@ -270,6 +326,14 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mile
         else:
             issues_list = []
 
+        # תאריך אחרון
+        last_dt = r.get("date")
+        last_date_str = ""
+        if isinstance(last_dt, pd.Timestamp):
+            last_date_str = str(last_dt.date())
+        elif last_dt:
+            last_date_str = str(last_dt)[:10]
+
         return {
             "score_breakdown": score_breakdown,
             "base_score_calculated": base_calc,
@@ -280,31 +344,14 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mile
             "sources": sources,
             "recommended_checks": recommended_checks,
             "common_competitors_brief": competitors,
-            "last_date": str(r.get("date").date()) if isinstance(r.get("date"), pd.Timestamp) else str(r.get("date") or "")
+            "last_date": last_date_str,
+            "cached_mileage_range": r.get("mileage_range", "")
         }
 
-    if len(hits) >= 3:
-        # aggregate: average numeric fields where possible; use last row for details
-        base_series = pd.to_numeric(hits.get("base_score_calculated"), errors="coerce")
-        if base_series.isna().all() and "base_score" in hits.columns:
-            base_series = pd.to_numeric(hits.get("base_score"), errors="coerce")
-        avg_cost_series  = pd.to_numeric(hits.get("avg_cost"), errors="coerce")
-        last_row = hits.iloc[-1].to_dict()
-        parsed_last = row_to_parsed(last_row)
-        parsed_last["is_aggregate"] = True
-        parsed_last["count"] = int(len(hits))
-        if not base_series.dropna().empty:
-            parsed_last["base_score_calculated"] = int(round(base_series.dropna().mean()))
-        if not avg_cost_series.dropna().empty:
-            parsed_last["avg_repair_cost_ILS"] = int(round(avg_cost_series.dropna().mean()))
-        parsed_last["search_performed"] = "true (history aggregate)"
-        return parsed_last, df, used_fallback
-
-    row = hits.iloc[-1].to_dict()
-    parsed_row = row_to_parsed(row)
+    parsed_row = row_to_parsed(best.to_dict())
     parsed_row["is_aggregate"] = False
     parsed_row["count"] = int(len(hits))
-    return parsed_row, df, used_fallback
+    return parsed_row, df, used_fallback, mileage_matched
 
 # ---------- UI (inputs) ----------
 st.markdown("### 🔍 בחירת יצרן, דגם ותת-דגם")
@@ -353,12 +400,12 @@ with col2:
 st.markdown("---")
 
 # ---------- Render (transparent UI) ----------
-def render_like_model(parsed_data: dict, source_tag: str):
+def render_like_model(parsed_data: dict, source_tag: str, extra_notes: list[str] | None = None):
     # parsed_data supports:
     # base_score_calculated, score_breakdown{}, reliability_summary,
     # common_issues[], issues_with_costs[], avg_repair_cost_ILS, recommended_checks[], common_competitors_brief[]
     base_score = int(parsed_data.get("base_score_calculated", 0) or 0)
-    summary = parsed_data.get("reliability_summary", "")
+    summary = parsed_data.get("reliability_summary", "") or ""
     score_breakdown = parsed_data.get("score_breakdown", {}) or {}
     issues_list = parsed_data.get("common_issues", []) or []
     detailed_costs_list = parsed_data.get("issues_with_costs", []) or []
@@ -366,10 +413,17 @@ def render_like_model(parsed_data: dict, source_tag: str):
     competitors = parsed_data.get("common_competitors_brief", []) or []
     avg_cost = parsed_data.get("avg_repair_cost_ILS", None)
 
+    # 1) Metric
     st.metric(label="ציון אמינות משוקלל", value=f"{base_score} / 100")
+
+    # 2) Summary + extra notes line
+    notes = extra_notes or []
     if summary:
         st.write(summary)
+    if notes:
+        st.warning(" ; ".join(notes))
 
+    # 3) Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["פירוט הציון", "תקלות ועלויות", "בדיקות מומלצות", "מתחרים"])
 
     with tab1:
@@ -384,6 +438,11 @@ def render_like_model(parsed_data: dict, source_tag: str):
             c3.metric("ריקולים", f"{score_breakdown.get('recalls_score', 'N/A')}/10")
         else:
             st.info("אין נתוני פירוט ציון זמינים מהמאגר לרכב זה.")
+        # הסבר מפורט על התאמות הק״מ (אם יש)
+        if extra_notes:
+            st.markdown("**הערות חישוב הק״מ:**")
+            for n in extra_notes:
+                st.markdown(f"- {n}")
 
     with tab2:
         if issues_list:
@@ -391,7 +450,7 @@ def render_like_model(parsed_data: dict, source_tag: str):
             for i in issues_list:
                 st.markdown(f"- {i}")
         if detailed_costs_list:
-            st.markdown("**💰 עלויות תיקון (אינדיקטיבי):**")
+            st.markבון("**💰 עלויות תיקון (אינדיקטיבי):**")
             for item in detailed_costs_list:
                 if isinstance(item, dict):
                     issue = item.get("issue","")
@@ -431,6 +490,39 @@ def render_like_model(parsed_data: dict, source_tag: str):
     if source_tag:
         st.caption(source_tag)
 
+# ---------- Apply mileage adjustment ----------
+def apply_mileage_logic_and_notes(result_obj: dict, requested_mileage: str, came_from_cache: bool, mileage_matched: bool, cached_mileage: str|None):
+    """
+    מחיל ענישה/התאמה לפי טווח ק״מ ומוסיף הערות למשתמש.
+    מחזיר (result_obj_updated, notes_list)
+    """
+    notes = []
+
+    # הערת אי-התאמה בק״מ אם נלקח מהמאגר אבל אין התאמה קרובה
+    if came_from_cache and not mileage_matched:
+        notes.append("⚠️ טווח הק״מ במאגר לא תאם להזנה — מוצג מידע משוער. (ק״מ במאגר: " +
+                     (cached_mileage or "לא ידוע") + ")")
+
+    # ענישה לפי הק״מ המבוקש
+    delta, note = mileage_adjustment(requested_mileage)
+    if delta != 0:
+        try:
+            base = int(result_obj.get("base_score_calculated") or 0)
+        except Exception:
+            base = 0
+        new_base = max(0, min(100, base + delta))
+        result_obj["base_score_calculated"] = new_base
+        if note:
+            notes.append(note)
+
+        # נעדכן גם summary בטקסט קצר (אינטגרלי)
+        summary = result_obj.get("reliability_summary", "") or ""
+        addendum = " (הציון הותאם בהתאם לטווח הק״מ)."
+        if addendum not in summary:
+            result_obj["reliability_summary"] = (summary + addendum).strip()
+
+    return result_obj, notes
+
 # ---------- Run ----------
 if st.button("בדוק אמינות"):
     if not selected_make or not selected_model:
@@ -447,8 +539,8 @@ if st.button("בדוק אמינות"):
         st.error(f"חציתם את מגבלת {GLOBAL_DAILY_LIMIT} הבדיקות היומיות (בוצעו {total_global}). נסו מחר.")
         st.stop()
 
-    # Cache קודם (עם A→B fallback + mileage)
-    cached_parsed, _, used_fallback = get_cached_from_sheet(
+    # Cache קודם (עם A→B fallback + flexible mileage)
+    cached_parsed, _, used_fallback, mileage_matched = get_cached_from_sheet(
         selected_make, selected_model, sub_model, int(year), mileage_range, max_days=45
     )
     if cached_parsed:
@@ -460,8 +552,14 @@ if st.button("בדוק אמינות"):
             tag += f" (נבדק: {last_date}). לא בוצעה פנייה למודל."
         else:
             tag += ". לא בוצעה פנייה למודל."
+
+        # התאמות ק״מ + הערות
+        cached_parsed, notes = apply_mileage_logic_and_notes(
+            cached_parsed, mileage_range, came_from_cache=True, mileage_matched=mileage_matched,
+            cached_mileage=cached_parsed.get("cached_mileage_range")
+        )
         # הצגה שקופה
-        render_like_model(cached_parsed, tag)
+        render_like_model(cached_parsed, tag, notes)
         st.stop()
 
     # אין Cache → קריאה למודל
@@ -475,14 +573,13 @@ if st.button("בדוק אמינות"):
     except Exception as e:
         st.error("שגיאה בעיבוד תשובת המודל.")
         st.code(repr(e))
-        st.code(traceback.format_exc())
+        st.code(traceback.format_exc()))
         st.stop()
 
     # נרמול פלט (תמיכה אם המודל עדיין החזיר base_score בלבד)
     score_breakdown = parsed.get("score_breakdown", {}) or {}
     base_calc = parsed.get("base_score_calculated")
     if base_calc in [None, "", "nan"]:
-        # fallback לשדה ישן אם הופיע
         legacy = parsed.get("base_score", 0)
         try:
             base_calc = int(round(float(legacy)))
@@ -501,7 +598,12 @@ if st.button("בדוק אמינות"):
         "common_competitors_brief": parsed.get("common_competitors_brief", []) or []
     }
 
-    render_like_model(result_obj, "🌐 מקור: חיפוש בזמן אמת (Gemini)")
+    # התאמות ק״מ + הערות (ממודל — אין cached_mileage)
+    result_obj, notes = apply_mileage_logic_and_notes(
+        result_obj, mileage_range, came_from_cache=False, mileage_matched=True, cached_mileage=None
+    )
+
+    render_like_model(result_obj, "🌐 מקור: חיפוש בזמן אמת (Gemini)", notes)
 
     # כתיבה למאגר
     try:
