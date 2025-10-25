@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-# Car Reliability Analyzer – Israel (v3.1.2)
-# Sheets + Minimal Connect Banner + Smart 45d Cache + No Auth
-# Shows cached results EXACTLY like live model responses
+# Car Reliability Analyzer – Israel (v3.1.3)
+# Sheets + Smart 45d Cache + No Auth + Manual Input Limits (3 words & 30 chars)
+# Cached results render EXACTLY like live model responses (Gemini)
 
 import json, re, datetime, difflib, traceback
 import pandas as pd
@@ -9,31 +9,36 @@ import streamlit as st
 from json_repair import repair_json
 import google.generativeai as genai
 
-# ---------------- UI ----------------
+# ---------- UI ----------
 st.set_page_config(page_title="🚗 Car Reliability Analyzer (Sheets)", page_icon="🔧", layout="centered")
 st.title("🚗 Car Reliability Analyzer – בדיקת אמינות רכב בישראל (Sheets)")
 
-# ---------------- Secrets ----------------
+# ---------- Secrets ----------
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 GOOGLE_SHEET_ID = st.secrets.get("GOOGLE_SHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
-# ---------------- Model ----------------
+# ---------- Model ----------
 if not GEMINI_API_KEY:
     st.error("⚠️ חסר GEMINI_API_KEY ב-Secrets.")
     st.stop()
 genai.configure(api_key=GEMINI_API_KEY)
 llm = genai.GenerativeModel("gemini-2.5-flash")
 
-# ---------------- Models dictionary ----------------
+# ---------- Models dictionary ----------
 from car_models_dict import israeli_car_market_full_compilation
 
-# ---------------- Helpers ----------------
+# ---------- Helpers ----------
+ALLOWED_PATTERN = r"^[A-Za-zא-ת0-9\- ]+$"
+MAX_WORDS = 3
+MAX_LEN = 30
+ERR_MSG = "הזנה ארוכה מדי — ניתן להזין עד 3 מילים או 30 תווים"
+
 def normalize_text(s: str) -> str:
     if s is None:
         return ""
     s = re.sub(r"\(.*?\)", " ", str(s))
-    s = re.sub(r"[^0-9A-Za-zא-ת\- ]+", " ", s)  # הסר תווים לא חוקיים
+    s = re.sub(r"[^0-9A-Za-zא-ת\- ]+", " ", s)  # מותר: אותיות/ספרות/רווח/מקף
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
@@ -77,7 +82,6 @@ def build_prompt(make, model, year, fuel_type, transmission):
 """.strip()
 
 def safe_json_parse(value):
-    """מנסה לפענח מחרוזת JSON או להחזיר ערך ריק בטוח."""
     if value is None:
         return None
     if isinstance(value, (list, dict)):
@@ -94,11 +98,23 @@ def safe_json_parse(value):
         except Exception:
             return None
 
-# ---------------- Minimal Connectivity (Backend) ----------------
+def validate_input_or_stop(value: str):
+    if not value:
+        return ""
+    if not re.match(ALLOWED_PATTERN, value):
+        st.error(ERR_MSG); st.stop()
+    words = value.strip().split()
+    if len(words) > MAX_WORDS:
+        st.error(ERR_MSG); st.stop()
+    if len(value.strip()) > MAX_LEN:
+        st.error(ERR_MSG); st.stop()
+    return value.strip()
+
+# ---------- Sheets connectivity (no debug UI) ----------
 def connect_sheet():
-    """מנסה להתחבר ל-Google Sheets ומחזיר (ws, status_text, ok_bool)."""
     if not (GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON):
-        return None, "❌ התחברות למאגר נכשלה (חסרים Secrets).", False
+        st.error("❌ אין חיבור למאגר — חסרים Secrets.")
+        st.stop()
     try:
         svc = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
         if "\\n" in svc.get("private_key",""):
@@ -115,7 +131,6 @@ def connect_sheet():
         gc = gspread.authorize(credentials)
         sh = gc.open_by_key(GOOGLE_SHEET_ID)
         ws = sh.sheet1
-        # ודא כותרות – כולל שדות תצוגה מלאה זהים למודל
         headers = [
             "date","user_id","make","model","year","fuel","transmission",
             "base_score","avg_cost","issues","search_performed",
@@ -124,16 +139,14 @@ def connect_sheet():
         current = ws.row_values(1)
         if [c.lower() for c in current] != headers:
             ws.update("A1",[headers], value_input_option="USER_ENTERED")
-        return ws, "✅ התחברות למאגר: הצליחה", True
+        return ws
     except Exception:
-        return None, "❌ התחברות למאגר נכשלה (בדוק הרשאות/שיתוף ל-service account).", False
+        st.error("❌ אין חיבור למאגר — בדוק הרשאות/שיתוף לשירות.")
+        st.stop()
 
-ws, conn_msg, conn_ok = connect_sheet()
-st.caption(f"🔌 {conn_msg}")
-if not conn_ok:
-    st.stop()
+ws = connect_sheet()
 
-# ---------------- Sheet I/O ----------------
+# ---------- Sheet I/O ----------
 def sheet_to_df() -> pd.DataFrame:
     try:
         recs = ws.get_all_records()
@@ -162,26 +175,20 @@ def append_row_to_sheet(row_dict: dict):
         st.error("❌ כשל בכתיבה למאגר")
         st.code(repr(e))
 
-# ---------------- Limits ----------------
-GLOBAL_DAILY_LIMIT = 1000  # מגבלת מערכת בלבד
+# ---------- Limits ----------
+GLOBAL_DAILY_LIMIT = 1000
 
 def within_daily_global_limit(df: pd.DataFrame, limit=GLOBAL_DAILY_LIMIT):
     today = datetime.date.today().isoformat()
     cnt = len(df[df.get("date","").astype(str) == today]) if not df.empty and "date" in df.columns else 0
     return (cnt < limit, cnt)
 
-# ---------------- Smart Cache (45d, Hardened) ----------------
+# ---------- Smart Cache (45d, Hardened) ----------
 def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
-    """
-    קשיח: אם קיימת אפילו תוצאה אחת מ-≤45 יום → נחזיר מייד (ללא Gemini).
-    אם 3+ תוצאות → נחזיר ממוצע יציב לבסיס (base_score/avg_cost) + תצוגת issues אחרונות.
-    ההתאמה: שנתון 1:1, similarity ליצרן/דגם: קודם 0.97 ואז 0.93 עם normalize.
-    """
     df = sheet_to_df()
     if df.empty:
         return None, df
 
-    # טיפוסים ותאריך
     try:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
@@ -208,7 +215,6 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     if hits.empty:
         return None, df
 
-    # 3+ → ממוצע יציב; תצוגה מקסימלית לפי הרשומה האחרונה
     if len(hits) >= 3:
         base_score_series = pd.to_numeric(hits["base_score"], errors="coerce").dropna()
         avg_cost_series  = pd.to_numeric(hits["avg_cost"], errors="coerce").dropna()
@@ -229,7 +235,6 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
             "sources": last_row.get("sources","")
         }, df
 
-    # אחרת → תחזיר את החדשה ביותר 1:1
     row = hits.iloc[-1].to_dict()
     row["is_aggregate"] = False
     row["count"] = int(len(hits))
@@ -238,34 +243,17 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     row["last_date"] = str(hits.iloc[-1]["date"].date())
     return row, df
 
-# ---------------- UI Selection (with strict manual input limits) ----------------
+# ---------- UI Selection (STRICT: 3 words & 30 chars; live + submit) ----------
 st.markdown("### 🔍 בחירת יצרן, דגם ושנתון")
-
-MAX_WORDS = 3
-MAX_LEN = 30
-ALLOWED_PATTERN = r"^[A-Za-zא-ת0-9\- ]+$"
-
-def validate_input(label, value):
-    if not value:
-        return value
-    if not re.match(ALLOWED_PATTERN, value):
-        st.error(f"❌ {label} כולל תווים לא חוקיים — רק אותיות, ספרות, רווח ומקף מותר")
-        st.stop()
-    words = value.strip().split()
-    if len(words) > MAX_WORDS:
-        st.error(f"❌ {label}: עד {MAX_WORDS} מילים בלבד")
-        st.stop()
-    if len(value.strip()) > MAX_LEN:
-        st.error(f"❌ {label}: עד {MAX_LEN} תווים בלבד")
-        st.stop()
-    return value.strip()
 
 make_list = sorted(israeli_car_market_full_compilation.keys())
 make_choice = st.selectbox("בחר יצרן מהרשימה:", ["בחר..."] + make_list, index=0)
 
-make_input = st.text_input("או הזן שם יצרן ידנית (עד 3 מילים / 30 תווים, מותר מקף):")
-make_input = validate_input("שם יצרן", make_input) if make_input else ""
-
+make_input = st.text_input(
+    "או הזן שם יצרן ידנית (עד 3 מילים / 30 תווים, מותר מקף):",
+    max_chars=MAX_LEN
+)
+make_input = validate_input_or_stop(make_input) if make_input else ""
 selected_make = make_choice if make_choice != "בחר..." else make_input
 selected_make = selected_make or ""
 
@@ -276,9 +264,11 @@ if selected_make in israeli_car_market_full_compilation:
     models = israeli_car_market_full_compilation[selected_make]
     model_choice = st.selectbox(f"בחר דגם של {selected_make}:", ["בחר דגם..."] + models, index=0)
 
-    model_input = st.text_input("או הזן דגם ידנית (עד 3 מילים / 30 תווים, מותר מקף):")
-    model_input = validate_input("שם דגם", model_input) if model_input else ""
-
+    model_input = st.text_input(
+        "או הזן דגם ידנית (עד 3 מילים / 30 תווים, מותר מקף):",
+        max_chars=MAX_LEN
+    )
+    model_input = validate_input_or_stop(model_input) if model_input else ""
     selected_model = model_choice if model_choice != "בחר דגם..." else model_input
     selected_model = selected_model or ""
 
@@ -288,8 +278,11 @@ if selected_make in israeli_car_market_full_compilation:
             year_range = (yr_start, yr_end)
 else:
     if selected_make:
-        model_input = st.text_input("שם דגם (הקלדה ידנית):")
-        model_input = validate_input("שם דגם", model_input) if model_input else ""
+        model_input = st.text_input(
+            "שם דגם (הקלדה ידנית — עד 3 מילים / 30 תווים, מותר מקף):",
+            max_chars=MAX_LEN
+        )
+        model_input = validate_input_or_stop(model_input) if model_input else ""
         selected_model = model_input.strip()
 
 if year_range:
@@ -306,9 +299,8 @@ with col2:
 
 st.markdown("---")
 
-# ---------------- Render helpers ----------------
+# ---------- Render helpers ----------
 def render_like_model(base_score, summary, issues_list, detailed_costs_list, source_tag):
-    """מציג תוצאה בדיוק כמו פורמט המודל."""
     st.subheader(f"ציון אמינות כולל: {int(base_score)}/100")
     if summary:
         st.write(summary)
@@ -328,7 +320,6 @@ def render_like_model(base_score, summary, issues_list, detailed_costs_list, sou
         st.caption(source_tag)
 
 def explode_issues(issues_field):
-    """מקבל 'issues' שעלול להיות מחרוזת מופרדת בנקודה-פסיק או רשימה; מחזיר רשימה."""
     if issues_field is None:
         return []
     if isinstance(issues_field, list):
@@ -340,20 +331,26 @@ def explode_issues(issues_field):
         return [x.strip() for x in s.split(",") if x.strip()]
     return [s] if s.strip() else []
 
-# ---------------- Run Button ----------------
+# ---------- Run ----------
 if st.button("בדוק אמינות"):
     if not selected_make or not selected_model:
         st.error("יש להזין שם יצרן ודגם תקינים.")
         st.stop()
 
-    # מגבלת מערכת יומית
+    # ולידציה סופית גם אחרי הלחיצה
+    for value in [selected_make, selected_model]:
+        if value:
+            if not re.match(ALLOWED_PATTERN, value): st.error(ERR_MSG); st.stop()
+            if len(value.strip().split()) > MAX_WORDS: st.error(ERR_MSG); st.stop()
+            if len(value.strip()) > MAX_LEN: st.error(ERR_MSG); st.stop()
+
     df_all = sheet_to_df()
     ok_global, total_global = within_daily_global_limit(df_all, limit=GLOBAL_DAILY_LIMIT)
     if not ok_global:
         st.error(f"❌ חציתם את מגבלת {GLOBAL_DAILY_LIMIT} הבדיקות היומיות (בוצעו {total_global}). נסו מחר.")
         st.stop()
 
-    # ===== Cache first (קשיח): אם יש אפילו אחת ב-≤45 יום → להציג מייד בפורמט זהה למודל =====
+    # ===== Cache first =====
     cached_row, _ = get_cached_from_sheet(selected_make, selected_model, int(year), max_days=45)
     if cached_row:
         base_score = cached_row.get("base_score", None)
@@ -399,7 +396,6 @@ if st.button("בדוק אמינות"):
     detailed_costs = parsed.get("issues_with_costs", [])
     sources = parsed.get("sources", [])
 
-    # תצוגה זהה
     render_like_model(
         base_score,
         summary,
@@ -410,7 +406,6 @@ if st.button("בדוק אמינות"):
     if avg_cost not in [None, "", "nan"]:
         st.info(f"עלות תחזוקה ממוצעת: כ-{int(float(avg_cost))} ₪")
 
-    # שמירה מלאה למאגר (נורמליזציה לשדות הטקסט)
     try:
         issues_str = "; ".join(issues) if isinstance(issues, list) else str(issues)
         issues_with_costs_str = json.dumps(detailed_costs, ensure_ascii=False)
@@ -436,4 +431,6 @@ if st.button("בדוק אמינות"):
         "issues_with_costs": issues_with_costs_str,
         "sources": sources_str
     })
-    st.caption("💾 נשמר למאגר בהצלחה.")
+
+st.markdown("---")
+st.caption("כל המידע מוצג כשירות עזר בלבד — אין לראות בתוצאה המלצה מקצועית.")
