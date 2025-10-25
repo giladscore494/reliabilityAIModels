@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
-# Car Reliability Analyzer – Israel (v3.3.0)
-# Sheets + 45d Cache • No auth/signup • No regex checks (only 30-char limit)
-# Free-text sub-model + A→B fallback (try sub-model; else model-only) • Cache renders like model
+# Car Reliability Analyzer – Israel (v3.4.0)
+# Sheets + 45d Cache • No auth/signup • 30-char input limit
+# Free-text sub-model + A→B fallback (try sub-model; else model-only)
+# ✅ NEW: Mileage range input • Transparent score breakdown • Tabs UI
+# ✅ NEW: Cache & Sheets include mileage_range + score_breakdown + base_score_calculated
 
 import json, re, datetime, difflib, traceback
 import pandas as pd
@@ -45,29 +47,45 @@ def parse_year_range_from_model_label(model_label: str):
     m = re.search(r"\((\d{4})\s*-\s*(\d{4})", str(model_label))
     return (int(m.group(1)), int(m.group(2))) if m else (None, None)
 
-def build_prompt(make, model, sub_model, year, fuel_type, transmission):
+def build_prompt(make, model, sub_model, year, fuel_type, transmission, mileage_range):
     extra = f" תת-דגם/תצורה: {sub_model}" if sub_model else ""
     return f"""
 אתה מומחה לאמינות רכבים בישראל עם גישה לחיפוש אינטרנטי.
+הניתוח חייב להתייחס ספציפית לטווח הקילומטראז' הנתון.
 חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
 החזר JSON בלבד:
 
 {{
-  "search_performed": true או false,
-  "base_score": מספר בין 0 ל-100,
-  "common_issues": [תקלות נפוצות בעברית],
-  "avg_repair_cost_ILS": מספר ממוצע,
+  "search_performed": true,
+  "score_breakdown": {{
+    "engine_transmission_score": "מספר (1-10)",
+    "electrical_score": "מספר (1-10)",
+    "suspension_brakes_score": "מספר (1-10)",
+    "maintenance_cost_score": "מספר (1-10)",
+    "satisfaction_score": "מספר (1-10)",
+    "recalls_score": "מספר (1-10)"
+  }},
+  "base_score_calculated": "מספר (0-100), מבוסס על המשקלות",
+  "common_issues": ["תקלות נפוצות בעברית (רלוונטיות לק\"מ)"],
+  "avg_repair_cost_ILS": "מספר ממוצע",
   "issues_with_costs": [
-    {{"issue": "שם התקלה בעברית", "avg_cost_ILS": מספר, "source": "מקור"}}
+    {{"issue": "שם התקלה", "avg_cost_ILS": "מספר", "source": "מקור", "severity": "נמוך/בינוני/גבוה"}}
   ],
-  "reliability_summary": "סיכום בעברית על רמת האמינות",
-  "sources": ["רשימת אתרים"]
+  "reliability_summary": "סיכום בעברית (להתייחס להשפעת הק\"מ)",
+  "sources": ["רשימת אתרים"],
+  "recommended_checks": ["בדיקות מומלצות ספציפיות לדגם זה במוסך"],
+  "common_competitors_brief": [
+      {{"model": "שם מתחרה 1", "brief_summary": "סיכום אמינות קצר של המתחרה"}},
+      {{"model": "שם מתחרה 2", "brief_summary": "סיכום אמינות קצר של המתחרה"}}
+  ]
 }}
 
-🧮 משקלות:
-מנוע/גיר 35%, חשמל/אלקטרוניקה 20%, מתלים/בלמים 10%, עלות תחזוקה 15%, שביעות רצון 15%, ריקולים 5%.
+🧮 משקלות לחישוב base_score_calculated (מתוך 100):
+מנוע/גיר (35%), חשמל/אלקטרוניקה (20%), מתלים/בלמים (10%), עלות תחזוקה (15%), שביעות רצון (15%), ריקולים (5%).
+(הציון לכל קטגוריה הוא 1-10, תכפיל ב-10 כדי לקבל ציון מתוך 100 לכל קטגוריה לפני השקלול)
 
 רכב: {make} {model}{extra} {int(year)}
+טווח קילומטראז': {mileage_range}
 סוג דלק: {fuel_type}
 תיבת הילוכים: {transmission}
 כתוב בעברית בלבד.
@@ -114,10 +132,14 @@ def connect_sheet():
         gc = gspread.authorize(credentials)
         sh = gc.open_by_key(GOOGLE_SHEET_ID)
         ws = sh.sheet1
+
+        # v3.4.0 headers (backward compatible additions)
         headers = [
             "date","user_id","make","model","sub_model","year","fuel","transmission",
-            "base_score","avg_cost","issues","search_performed",
-            "reliability_summary","issues_with_costs","sources"
+            "mileage_range",
+            "base_score_calculated","score_breakdown","avg_cost","issues","search_performed",
+            "reliability_summary","issues_with_costs","sources",
+            "recommended_checks","common_competitors_brief"
         ]
         current = ws.row_values(1)
         if [c.lower() for c in current] != headers:
@@ -131,26 +153,29 @@ def connect_sheet():
 ws = connect_sheet()
 
 def sheet_to_df() -> pd.DataFrame:
+    cols = [
+        "date","user_id","make","model","sub_model","year","fuel","transmission",
+        "mileage_range",
+        "base_score_calculated","score_breakdown","avg_cost","issues","search_performed",
+        "reliability_summary","issues_with_costs","sources",
+        "recommended_checks","common_competitors_brief"
+    ]
     try:
         recs = ws.get_all_records()
     except Exception as e:
         st.error("כשל בקריאת המאגר.")
         st.code(repr(e))
-        return pd.DataFrame(columns=[
-            "date","user_id","make","model","sub_model","year","fuel","transmission",
-            "base_score","avg_cost","issues","search_performed",
-            "reliability_summary","issues_with_costs","sources"
-        ])
-    return pd.DataFrame(recs) if recs else pd.DataFrame(columns=[
-        "date","user_id","make","model","sub_model","year","fuel","transmission",
-        "base_score","avg_cost","issues","search_performed",
-        "reliability_summary","issues_with_costs","sources"
-    ])
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(recs) if recs else pd.DataFrame(columns=cols)
 
 def append_row_to_sheet(row_dict: dict):
-    order = ["date","user_id","make","model","sub_model","year","fuel","transmission",
-             "base_score","avg_cost","issues","search_performed",
-             "reliability_summary","issues_with_costs","sources"]
+    order = [
+        "date","user_id","make","model","sub_model","year","fuel","transmission",
+        "mileage_range",
+        "base_score_calculated","score_breakdown","avg_cost","issues","search_performed",
+        "reliability_summary","issues_with_costs","sources",
+        "recommended_checks","common_competitors_brief"
+    ]
     row = [row_dict.get(k,"") for k in order]
     try:
         ws.append_row(row, value_input_option="USER_ENTERED")
@@ -165,10 +190,12 @@ def within_daily_global_limit(df: pd.DataFrame, limit=GLOBAL_DAILY_LIMIT):
     cnt = len(df[df.get("date","").astype(str) == today]) if not df.empty and "date" in df.columns else 0
     return (cnt < limit, cnt)
 
-# ---------- Cache (45d) + sub_model A→B ----------
-def match_hits(recent: pd.DataFrame, year: int, make: str, model: str, sub_model: str|None, th: float):
+# ---------- Cache (45d) + sub_model A→B + mileage ----------
+def match_hits(recent: pd.DataFrame, year: int, make: str, model: str, sub_model: str|None, mileage_range: str, th: float):
     mk, md, sm = normalize_text(make), normalize_text(model), normalize_text(sub_model or "")
+    mr = normalize_text(mileage_range or "")
     use_sub = len(sm) > 0
+
     cand = recent[
         (recent["year"].astype("Int64") == int(year)) &
         (recent["make"].apply(lambda x: similarity(x, mk) >= th)) &
@@ -176,14 +203,16 @@ def match_hits(recent: pd.DataFrame, year: int, make: str, model: str, sub_model
     ]
     if use_sub and "sub_model" in recent.columns:
         cand = cand[cand["sub_model"].apply(lambda x: similarity(x, sm) >= th)]
+    # mileage exact-ish match when column exists
+    if "mileage_range" in recent.columns and mr:
+        cand = cand[cand["mileage_range"].apply(lambda x: similarity(str(x), mr) >= 0.97)]
 
-    # ✅ FIX: למנוע KeyError אם אין "date"
     if "date" in cand.columns:
         return cand.sort_values("date")
     else:
         return cand
 
-def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, max_days=45):
+def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mileage_range: str, max_days=45):
     df = sheet_to_df()
     if df.empty:
         return None, df, False
@@ -198,45 +227,86 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, max_
     used_fallback = False
     hits = pd.DataFrame()
     for th in (0.97, 0.93):
-        hits = match_hits(recent, year, make, model, sub_model, th)
+        hits = match_hits(recent, year, make, model, sub_model, mileage_range, th)
         if not hits.empty:
             break
     if hits.empty and sub_model:
         used_fallback = True
         for th in (0.97, 0.93):
-            hits = match_hits(recent, year, make, model, None, th)
+            hits = match_hits(recent, year, make, model, None, mileage_range, th)
             if not hits.empty:
                 break
     if hits.empty:
         return None, df, used_fallback
 
-    if len(hits) >= 3:
-        base_score_series = pd.to_numeric(hits["base_score"], errors="coerce").dropna()
-        avg_cost_series  = pd.to_numeric(hits["avg_cost"], errors="coerce").dropna()
-        issues_tail = "; ".join([str(x) for x in hits["issues"].astype(str).tail(3)])
-        last_row = hits.iloc[-1].to_dict()
+    # Build a "parsed_data-like" object from cache (supports old rows without breakdown)
+    def row_to_parsed(r: dict):
+        score_breakdown = safe_json_parse(r.get("score_breakdown")) or {}
+        issues_with_costs = safe_json_parse(r.get("issues_with_costs")) or []
+        recommended_checks = safe_json_parse(r.get("recommended_checks")) or []
+        competitors = safe_json_parse(r.get("common_competitors_brief")) or []
+        sources = safe_json_parse(r.get("sources")) or r.get("sources","")
+
+        # Back-compat: base_score_calculated may be empty in old rows; fallback to "base_score"
+        base_calc = r.get("base_score_calculated")
+        if base_calc in [None, "", "nan"]:
+            # legacy field name
+            legacy_base = r.get("base_score")
+            try:
+                base_calc = int(round(float(legacy_base)))
+            except Exception:
+                base_calc = None
+
+        issues_raw = r.get("issues", [])
+        if isinstance(issues_raw, str) and issues_raw:
+            if ";" in issues_raw:
+                issues_list = [x.strip() for x in issues_raw.split(";") if x.strip()]
+            elif "," in issues_raw:
+                issues_list = [x.strip() for x in issues_raw.split(",") if x.strip()]
+            else:
+                issues_list = [issues_raw.strip()]
+        elif isinstance(issues_raw, list):
+            issues_list = [str(x).strip() for x in issues_raw if str(x).strip()]
+        else:
+            issues_list = []
+
         return {
-            "is_aggregate": True,
-            "count": int(len(hits)),
-            "base_score": int(round(base_score_series.mean())) if not base_score_series.empty else None,
-            "avg_cost": int(round(avg_cost_series.mean())) if not avg_cost_series.empty else None,
-            "issues": issues_tail,
-            "issues_with_costs": safe_json_parse(last_row.get("issues_with_costs")) or [],
-            "reliability_summary": last_row.get("reliability_summary") or "",
-            "search_performed": "true (history aggregate)",
-            "last_date": str(hits.iloc[-1]["date"].date()) if "date" in hits.columns else "",
-            "sources": last_row.get("sources","")
-        }, df, used_fallback
+            "score_breakdown": score_breakdown,
+            "base_score_calculated": base_calc,
+            "common_issues": issues_list,
+            "avg_repair_cost_ILS": r.get("avg_cost"),
+            "issues_with_costs": issues_with_costs,
+            "reliability_summary": r.get("reliability_summary") or "",
+            "sources": sources,
+            "recommended_checks": recommended_checks,
+            "common_competitors_brief": competitors,
+            "last_date": str(r.get("date").date()) if isinstance(r.get("date"), pd.Timestamp) else str(r.get("date") or "")
+        }
+
+    if len(hits) >= 3:
+        # aggregate: average numeric fields where possible; use last row for details
+        base_series = pd.to_numeric(hits.get("base_score_calculated"), errors="coerce")
+        if base_series.isna().all() and "base_score" in hits.columns:
+            base_series = pd.to_numeric(hits.get("base_score"), errors="coerce")
+        avg_cost_series  = pd.to_numeric(hits.get("avg_cost"), errors="coerce")
+        last_row = hits.iloc[-1].to_dict()
+        parsed_last = row_to_parsed(last_row)
+        parsed_last["is_aggregate"] = True
+        parsed_last["count"] = int(len(hits))
+        if not base_series.dropna().empty:
+            parsed_last["base_score_calculated"] = int(round(base_series.dropna().mean()))
+        if not avg_cost_series.dropna().empty:
+            parsed_last["avg_repair_cost_ILS"] = int(round(avg_cost_series.dropna().mean()))
+        parsed_last["search_performed"] = "true (history aggregate)"
+        return parsed_last, df, used_fallback
 
     row = hits.iloc[-1].to_dict()
-    row["is_aggregate"] = False
-    row["count"] = int(len(hits))
-    row["issues_with_costs"] = safe_json_parse(row.get("issues_with_costs")) or []
-    row["reliability_summary"] = row.get("reliability_summary") or ""
-    row["last_date"] = str(hits.iloc[-1]["date"].date()) if "date" in hits.columns else ""
-    return row, df, used_fallback
+    parsed_row = row_to_parsed(row)
+    parsed_row["is_aggregate"] = False
+    parsed_row["count"] = int(len(hits))
+    return parsed_row, df, used_fallback
 
-# ---------- UI ----------
+# ---------- UI (inputs) ----------
 st.markdown("### 🔍 בחירת יצרן, דגם ותת-דגם")
 
 # בחירה מהמילון + קלדה חופשית משולבים
@@ -270,6 +340,10 @@ if year_range:
 else:
     year = st.number_input("שנת ייצור:", min_value=1960, max_value=2025, step=1)
 
+# ✅ NEW: טווח קילומטראז'
+mileage_ranges = ["עד 50,000 ק\"מ", "50,000 - 100,000 ק\"מ", "100,000 - 150,000 ק\"מ", "150,000 - 200,000 ק\"מ", "200,000+ ק\"מ"]
+mileage_range = st.selectbox("טווח קילומטראז':", mileage_ranges)
+
 col1, col2 = st.columns(2)
 with col1:
     fuel_type = st.selectbox("סוג דלק:", ["בנזין", "דיזל", "היברידי", "חשמלי", "אחר"])
@@ -278,35 +352,84 @@ with col2:
 
 st.markdown("---")
 
-# ---------- Render ----------
-def render_like_model(base_score, summary, issues_list, detailed_costs_list, source_tag):
-    st.subheader(f"ציון אמינות כולל: {int(base_score)}/100")
+# ---------- Render (transparent UI) ----------
+def render_like_model(parsed_data: dict, source_tag: str):
+    # parsed_data supports:
+    # base_score_calculated, score_breakdown{}, reliability_summary,
+    # common_issues[], issues_with_costs[], avg_repair_cost_ILS, recommended_checks[], common_competitors_brief[]
+    base_score = int(parsed_data.get("base_score_calculated", 0) or 0)
+    summary = parsed_data.get("reliability_summary", "")
+    score_breakdown = parsed_data.get("score_breakdown", {}) or {}
+    issues_list = parsed_data.get("common_issues", []) or []
+    detailed_costs_list = parsed_data.get("issues_with_costs", []) or []
+    recommended_checks = parsed_data.get("recommended_checks", []) or []
+    competitors = parsed_data.get("common_competitors_brief", []) or []
+    avg_cost = parsed_data.get("avg_repair_cost_ILS", None)
+
+    st.metric(label="ציון אמינות משוקלל", value=f"{base_score} / 100")
     if summary:
         st.write(summary)
-    if issues_list:
-        st.markdown("**🔧 תקלות נפוצות:**")
-        for i in issues_list:
-            st.markdown(f"- {i}")
-    if detailed_costs_list:
-        st.markdown("**💰 עלויות תיקון (אינדיקטיבי):**")
-        for item in detailed_costs_list:
-            if isinstance(item, dict):
-                issue = item.get("issue","")
-                cost  = item.get("avg_cost_ILS", 0)
-                src   = item.get("source","")
-                st.markdown(f"- {issue}: כ-{int(cost)} ₪ (מקור: {src})")
+
+    tab1, tab2, tab3, tab4 = st.tabs(["פירוט הציון", "תקלות ועלויות", "בדיקות מומלצות", "מתחרים"])
+
+    with tab1:
+        st.markdown("#### 📊 פירוט הציון (1-10)")
+        if score_breakdown:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("מנוע וגיר", f"{score_breakdown.get('engine_transmission_score', 'N/A')}/10")
+            c2.metric("חשמל ואלקטרוניקה", f"{score_breakdown.get('electrical_score', 'N/A')}/10")
+            c3.metric("מתלים ובלמים", f"{score_breakdown.get('suspension_brakes_score', 'N/A')}/10")
+            c1.metric("עלות אחזקה", f"{score_breakdown.get('maintenance_cost_score', 'N/A')}/10")
+            c2.metric("שביעות רצון", f"{score_breakdown.get('satisfaction_score', 'N/A')}/10")
+            c3.metric("ריקולים", f"{score_breakdown.get('recalls_score', 'N/A')}/10")
+        else:
+            st.info("אין נתוני פירוט ציון זמינים מהמאגר לרכב זה.")
+
+    with tab2:
+        if issues_list:
+            st.markdown("**🔧 תקלות נפוצות:**")
+            for i in issues_list:
+                st.markdown(f"- {i}")
+        if detailed_costs_list:
+            st.markdown("**💰 עלויות תיקון (אינדיקטיבי):**")
+            for item in detailed_costs_list:
+                if isinstance(item, dict):
+                    issue = item.get("issue","")
+                    cost  = item.get("avg_cost_ILS", 0)
+                    severity = item.get("severity", "")
+                    tag = f" (חומרה: {severity})" if severity else ""
+                    try:
+                        cost_txt = f"{int(float(cost))}"
+                    except Exception:
+                        cost_txt = str(cost)
+                    st.markdown(f"- {issue}: כ-{cost_txt} ₪{tag}")
+        if not issues_list and not detailed_costs_list:
+            st.info("אין מידע על תקלות/עלויות שמורות למקרה זה.")
+
+    with tab3:
+        if recommended_checks:
+            st.markdown("**🔬 מה כדאי לבדוק במוסך?**")
+            for check in recommended_checks:
+                st.markdown(f"- {check}")
+        else:
+            st.info("אין המלצות בדיקה ספציפיות למודל זה במאגר.")
+
+    with tab4:
+        if competitors:
+            st.markdown("**🚗 מתחרים נפוצים**")
+            for comp in competitors:
+                st.markdown(f"**{comp.get('model', '')}:** {comp.get('brief_summary', '')}")
+        else:
+            st.info("אין נתוני מתחרים שמורים למודל זה.")
+
+    if avg_cost not in [None, "", "nan"]:
+        try:
+            st.info(f"עלות תחזוקה ממוצעת: כ-{int(float(avg_cost))} ₪")
+        except Exception:
+            st.info(f"עלות תחזוקה ממוצעת (אינדיקטיבי): {avg_cost}")
+
     if source_tag:
         st.caption(source_tag)
-
-def explode_issues(issues_field):
-    if issues_field is None:
-        return []
-    if isinstance(issues_field, list):
-        return [str(x).strip() for x in issues_field if str(x).strip()]
-    s = str(issues_field)
-    if ";" in s: return [x.strip() for x in s.split(";") if x.strip()]
-    if "," in s: return [x.strip() for x in s.split(",") if x.strip()]
-    return [s] if s.strip() else []
 
 # ---------- Run ----------
 if st.button("בדוק אמינות"):
@@ -324,31 +447,25 @@ if st.button("בדוק אמינות"):
         st.error(f"חציתם את מגבלת {GLOBAL_DAILY_LIMIT} הבדיקות היומיות (בוצעו {total_global}). נסו מחר.")
         st.stop()
 
-    # Cache קודם (עם A→B fallback)
-    cached_row, _, used_fallback = get_cached_from_sheet(selected_make, selected_model, sub_model, int(year), max_days=45)
-    if cached_row:
-        base_score = cached_row.get("base_score", None)
-        avg_cost   = cached_row.get("avg_cost", None)
-        issues_raw = cached_row.get("issues", [])
-        issues_list = explode_issues(issues_raw)
-        detailed_costs = cached_row.get("issues_with_costs", []) or []
-        summary = cached_row.get("reliability_summary", "") or ""
-        last_date = cached_row.get("last_date", "")
+    # Cache קודם (עם A→B fallback + mileage)
+    cached_parsed, _, used_fallback = get_cached_from_sheet(
+        selected_make, selected_model, sub_model, int(year), mileage_range, max_days=45
+    )
+    if cached_parsed:
         tag = "✅ מקור: נתון קיים מהמאגר"
         if used_fallback and sub_model:
             tag += " (נמצאה התאמה לפי דגם בלבד)"
-        tag += f" (נבדק: {last_date}). לא בוצעה פנייה למודל."
-        if base_score is not None:
-            render_like_model(base_score, summary, issues_list, detailed_costs, tag)
-            if avg_cost not in [None, "", "nan"]:
-                st.info(f"עלות תחזוקה ממוצעת: כ-{int(float(avg_cost))} ₪")
-            st.stop()
+        last_date = cached_parsed.get("last_date","")
+        if last_date:
+            tag += f" (נבדק: {last_date}). לא בוצעה פנייה למודל."
         else:
-            st.warning("אין ציון שמור במאגר עבור הרכב הזה. ניתן לבצע בדיקה עדכנית.")
-            st.stop()
+            tag += ". לא בוצעה פנייה למודל."
+        # הצגה שקופה
+        render_like_model(cached_parsed, tag)
+        st.stop()
 
     # אין Cache → קריאה למודל
-    prompt = build_prompt(selected_make, selected_model, sub_model, int(year), fuel_type, transmission)
+    prompt = build_prompt(selected_make, selected_model, sub_model, int(year), fuel_type, transmission, mileage_range)
     try:
         with st.spinner("מבצע חיפוש אינטרנטי ומחשב ציון..."):
             resp = llm.generate_content(prompt)
@@ -361,24 +478,46 @@ if st.button("בדוק אמינות"):
         st.code(traceback.format_exc())
         st.stop()
 
-    base_score = int(parsed.get("base_score", 0) or 0)
-    issues = parsed.get("common_issues", [])
-    avg_cost = parsed.get("avg_repair_cost_ILS", 0)
-    summary = parsed.get("reliability_summary", "אין מידע.")
-    detailed_costs = parsed.get("issues_with_costs", [])
-    sources = parsed.get("sources", [])
+    # נרמול פלט (תמיכה אם המודל עדיין החזיר base_score בלבד)
+    score_breakdown = parsed.get("score_breakdown", {}) or {}
+    base_calc = parsed.get("base_score_calculated")
+    if base_calc in [None, "", "nan"]:
+        # fallback לשדה ישן אם הופיע
+        legacy = parsed.get("base_score", 0)
+        try:
+            base_calc = int(round(float(legacy)))
+        except Exception:
+            base_calc = 0
 
-    render_like_model(base_score, summary, issues, detailed_costs, "🌐 מקור: חיפוש בזמן אמת (Gemini)")
-    if avg_cost not in [None, "", "nan"]:
-        st.info(f"עלות תחזוקה ממוצעת: כ-{int(float(avg_cost))} ₪")
+    result_obj = {
+        "score_breakdown": score_breakdown,
+        "base_score_calculated": int(base_calc or 0),
+        "common_issues": parsed.get("common_issues", []) or [],
+        "avg_repair_cost_ILS": parsed.get("avg_repair_cost_ILS", 0),
+        "issues_with_costs": parsed.get("issues_with_costs", []) or [],
+        "reliability_summary": parsed.get("reliability_summary", "אין מידע."),
+        "sources": parsed.get("sources", []) or [],
+        "recommended_checks": parsed.get("recommended_checks", []) or [],
+        "common_competitors_brief": parsed.get("common_competitors_brief", []) or []
+    }
+
+    render_like_model(result_obj, "🌐 מקור: חיפוש בזמן אמת (Gemini)")
 
     # כתיבה למאגר
     try:
-        issues_str = "; ".join(issues) if isinstance(issues, list) else str(issues)
-        issues_with_costs_str = json.dumps(detailed_costs, ensure_ascii=False)
-        sources_str = json.dumps(sources, ensure_ascii=False) if isinstance(sources, list) else str(sources)
+        issues_str = "; ".join(result_obj["common_issues"]) if isinstance(result_obj["common_issues"], list) else str(result_obj["common_issues"])
+        issues_with_costs_str = json.dumps(result_obj["issues_with_costs"], ensure_ascii=False)
+        sources_str = json.dumps(result_obj["sources"], ensure_ascii=False) if isinstance(result_obj["sources"], list) else str(result_obj["sources"])
+        score_breakdown_str = json.dumps(result_obj["score_breakdown"], ensure_ascii=False) if isinstance(result_obj["score_breakdown"], dict) else str(result_obj["score_breakdown"])
+        recommended_checks_str = json.dumps(result_obj["recommended_checks"], ensure_ascii=False)
+        competitors_str = json.dumps(result_obj["common_competitors_brief"], ensure_ascii=False)
     except Exception:
-        issues_str = str(issues); issues_with_costs_str = str(detailed_costs); sources_str = str(sources)
+        issues_str = str(result_obj["common_issues"])
+        issues_with_costs_str = str(result_obj["issues_with_costs"])
+        sources_str = str(result_obj["sources"])
+        score_breakdown_str = str(result_obj["score_breakdown"])
+        recommended_checks_str = str(result_obj["recommended_checks"])
+        competitors_str = str(result_obj["common_competitors_brief"])
 
     append_row_to_sheet({
         "date": datetime.date.today().isoformat(),
@@ -389,13 +528,17 @@ if st.button("בדוק אמינות"):
         "year": int(year),
         "fuel": fuel_type,
         "transmission": transmission,
-        "base_score": base_score,
-        "avg_cost": avg_cost,
+        "mileage_range": mileage_range,
+        "base_score_calculated": int(result_obj["base_score_calculated"] or 0),
+        "score_breakdown": score_breakdown_str,
+        "avg_cost": result_obj["avg_repair_cost_ILS"],
         "issues": issues_str,
         "search_performed": "true",
-        "reliability_summary": summary,
+        "reliability_summary": result_obj["reliability_summary"],
         "issues_with_costs": issues_with_costs_str,
-        "sources": sources_str
+        "sources": sources_str,
+        "recommended_checks": recommended_checks_str,
+        "common_competitors_brief": competitors_str
     })
 
 st.markdown("---")
