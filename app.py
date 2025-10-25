@@ -1,30 +1,31 @@
 # -*- coding: utf-8 -*-
-# Car Reliability Analyzer – Israel (v3.8.1 • Production Clean)
-# Sheets + 45d Cache • No auth/signup • 30-char input limit
-# Free-text sub-model + A→B fallback (try sub-model; else model-only)
-# Mileage: flexible matching + explicit mismatch warning • Score penalty by km-range
-# No debug prints • No pre-run of model (only inside button)
+# ===========================================================
+# 🚗 Car Reliability Analyzer – Israel (v3.9.0 • Pro UX Clean)
+# Sheets + 45d Cache • No auth/signup • Soft 30-char indicator (no blocking)
+# Free-text sub-model always allowed • A→B fallback (sub-model -> model-only)
+# Mileage: flexible match + explicit warning • Score penalty by km-range
+# Modern UI: "Advanced Mode — Free Input" toggle • No debug prints
+# ===========================================================
 
 import json, re, time, datetime, difflib, traceback
+from typing import Optional, Tuple, Any, Dict, List
+
 import pandas as pd
 import streamlit as st
 from json_repair import repair_json
 import google.generativeai as genai
 
 # =========================
-# ====== CONFIG/FLAGS =====
+# ========= CONFIG ========
 # =========================
 PRIMARY_MODEL = "gemini-2.5-flash"
 FALLBACK_MODEL = "gemini-1.5-flash-latest"
 RETRIES = 2
 RETRY_BACKOFF_SEC = 1.5
 
-MAX_LEN = 30
-GLOBAL_DAILY_LIMIT = 1000
+SOFT_MAX_LEN = 30            # מציגים מונה/אזהרה בלבד, לא חוסמים
+GLOBAL_DAILY_LIMIT = 1000    # מגבלת בקשות גלובלית (ללא זיהוי משתמש)
 
-# =========================
-# ========= UI ============
-# =========================
 st.set_page_config(page_title="🚗 Car Reliability Analyzer (Sheets)", page_icon="🔧", layout="centered")
 st.title("🚗 Car Reliability Analyzer – בדיקת אמינות רכב בישראל (Sheets)")
 
@@ -43,12 +44,28 @@ genai.configure(api_key=GEMINI_API_KEY)
 # =========================
 # === Models dictionary ===
 # =========================
-from car_models_dict import israeli_car_market_full_compilation
+# צפה שקובץ זה קיים. אחרת, צור אותו עם מילון {'Make': ['Model (yyyy-yyyy)', ...], ...}
+try:
+    from car_models_dict import israeli_car_market_full_compilation
+except Exception:
+    israeli_car_market_full_compilation = {
+        "Volkswagen": [
+            "Golf (2004-2025)",
+            "Polo (2005-2025)",
+            "Passat (2005-2025)",
+            "Scirocco (2008-2017)"  # דוגמה; אפשר להרחיב
+        ],
+        "Toyota": [
+            "Corolla (2008-2025)",
+            "Yaris (2008-2025)",
+            "CHR (2016-2025)"
+        ],
+    }
 
 # =========================
 # ===== Helper funcs ======
 # =========================
-def normalize_text(s: str) -> str:
+def normalize_text(s: Any) -> str:
     if s is None:
         return ""
     s = re.sub(r"\(.*?\)", " ", str(s))
@@ -58,11 +75,11 @@ def normalize_text(s: str) -> str:
 def similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, normalize_text(a), normalize_text(b)).ratio()
 
-def parse_year_range_from_model_label(model_label: str):
+def parse_year_range_from_model_label(model_label: str) -> Tuple[Optional[int], Optional[int]]:
     m = re.search(r"\((\d{4})\s*-\s*(\d{4})", str(model_label))
     return (int(m.group(1)), int(m.group(2))) if m else (None, None)
 
-def safe_json_parse(value, default=None):
+def safe_json_parse(value: Any, default=None):
     if value is None:
         return default
     if isinstance(value, (list, dict)):
@@ -79,55 +96,10 @@ def safe_json_parse(value, default=None):
         except Exception:
             return default
 
-def check_len_or_stop(*values):
-    for v in values:
-        if v and len(v) > MAX_LEN:
-            st.error("הזנה ארוכה מדי — עד 30 תווים")
-            raise ValueError("Input too long")
-
-def build_prompt(make, model, sub_model, year, fuel_type, transmission, mileage_range):
-    extra = f" תת-דגם/תצורה: {sub_model}" if sub_model else ""
-    return f"""
-אתה מומחה לאמינות רכבים בישראל עם גישה לחיפוש אינטרנטי.
-הניתוח חייב להתייחס ספציפית לטווח הקילומטראז' הנתון.
-חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
-החזר JSON בלבד:
-
-{{
-  "search_performed": true,
-  "score_breakdown": {{
-    "engine_transmission_score": "מספר (1-10)",
-    "electrical_score": "מספר (1-10)",
-    "suspension_brakes_score": "מספר (1-10)",
-    "maintenance_cost_score": "מספר (1-10)",
-    "satisfaction_score": "מספר (1-10)",
-    "recalls_score": "מספר (1-10)"
-  }},
-  "base_score_calculated": "מספר (0-100), מבוסס על המשקלות",
-  "common_issues": ["תקלות נפוצות בעברית (רלוונטיות לק\"מ)"],
-  "avg_repair_cost_ILS": "מספר ממוצע",
-  "issues_with_costs": [
-    {{"issue": "שם התקלה", "avg_cost_ILS": "מספר", "source": "מקור", "severity": "נמוך/בינוני/גבוה"}}
-  ],
-  "reliability_summary": "סיכום בעברית (להתייחס להשפעת הק\"מ)",
-  "sources": ["רשימת אתרים"],
-  "recommended_checks": ["בדיקות מומלצות ספציפיות לדגם זה במוסך"],
-  "common_competitors_brief": [
-      {{"model": "שם מתחרה 1", "brief_summary": "סיכום אמינות קצר של המתחרה"}},
-      {{"model": "שם מתחרה 2", "brief_summary": "סיכום אמינות קצר של המתחרה"}}
-  ]
-}}
-
-🧮 משקלות לחישוב base_score_calculated (מתוך 100):
-מנוע/גיר (35%), חשמל/אלקטרוניקה (20%), מתלים/בלמים (10%), עלות תחזוקה (15%), שביעות רצון (15%), ריקולים (5%).
-(הציון לכל קטגוריה הוא 1-10, תכפיל ב-10 כדי לקבל ציון מתוך 100 לכל קטגוריה לפני השקלול)
-
-רכב: {make} {model}{extra} {int(year)}
-טווח קילומטראז': {mileage_range}
-סוג דלק: {fuel_type}
-תיבת הילוכים: {transmission}
-כתוב בעברית בלבד.
-""".strip()
+def char_counter(label: str, value: str, soft_max: int = SOFT_MAX_LEN):
+    """מציג מונה תווים + אזהרה רכה אם עברנו soft_max (ללא חסימה)."""
+    ln = len(value or "")
+    st.caption(f"{label} — {ln} תווים" + (f" (מומלץ עד {soft_max})" if ln > soft_max else ""))
 
 # =========================
 # ===== Sheets Layer ======
@@ -178,7 +150,6 @@ def sheet_to_df() -> pd.DataFrame:
         st.code(repr(e))
         return pd.DataFrame(columns=REQUIRED_HEADERS)
 
-    # הבטחת עמודות חסרות
     for h in REQUIRED_HEADERS:
         if h not in df.columns:
             df[h] = ""
@@ -197,7 +168,9 @@ def append_row_to_sheet(row_dict: dict):
 # =========================
 def within_daily_global_limit(df: pd.DataFrame, limit=GLOBAL_DAILY_LIMIT):
     today = datetime.date.today().isoformat()
-    cnt = len(df[df.get("date","").astype(str) == today]) if not df.empty and "date" in df.columns else 0
+    if df.empty or "date" not in df.columns:
+        return True, 0
+    cnt = len(df[df["date"].astype(str) == today])
     return (cnt < limit, cnt)
 
 # =========================
@@ -220,7 +193,6 @@ def mileage_adjustment(mileage_range: str):
     return 0, None
 
 def mileage_is_close(requested: str, stored: str, thr: float = 0.92) -> bool:
-    """התאמת ק״מ גמישה לפי דמיון טקסטואלי."""
     if requested is None or stored is None:
         return False
     return similarity(str(requested), str(stored)) >= thr
@@ -228,7 +200,7 @@ def mileage_is_close(requested: str, stored: str, thr: float = 0.92) -> bool:
 # =========================
 # ===== Cache lookup ======
 # =========================
-def match_hits_core(recent: pd.DataFrame, year: int, make: str, model: str, sub_model: str|None, th: float):
+def match_hits_core(recent: pd.DataFrame, year: int, make: str, model: str, sub_model: Optional[str], th: float):
     mk, md, sm = normalize_text(make), normalize_text(model), normalize_text(sub_model or "")
     use_sub = len(sm) > 0
     cand = recent[
@@ -245,7 +217,7 @@ def match_hits_core(recent: pd.DataFrame, year: int, make: str, model: str, sub_
 def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mileage_range: str, max_days=45):
     """
     מחזיר: parsed_row, df, used_fallback, mileage_matched
-    mileage_matched=False -> נוסיף אזהרה למשתמש אבל עדיין נציג Cache
+    mileage_matched=False -> נציג Cache עם אזהרת ק״מ בלבד
     """
     df = sheet_to_df()
     if df.empty:
@@ -261,7 +233,6 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mile
     used_fallback = False
     mileage_matched = False
 
-    # שלב 1: התאמה לפי make/model/sub_model
     hits = pd.DataFrame()
     for th in (0.97, 0.93):
         hits = match_hits_core(recent, year, make, model, sub_model, th)
@@ -285,7 +256,6 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mile
 
     hits = hits.copy()
     hits["__mil_sim"] = hits.apply(row_mil_sim, axis=1)
-    # מיון: דמיון ק״מ גבוה יותר -> תאריך חדש יותר
     hits = hits.sort_values(["__mil_sim", "date"], ascending=[False, False])
 
     best = hits.iloc[0]
@@ -348,6 +318,50 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, mile
 # =========================
 # ===== Model calling =====
 # =========================
+def build_prompt(make, model, sub_model, year, fuel_type, transmission, mileage_range):
+    extra = f" תת-דגם/תצורה: {sub_model}" if sub_model else ""
+    return f"""
+אתה מומחה לאמינות רכבים בישראל עם גישה לחיפוש אינטרנטי.
+הניתוח חייב להתייחס ספציפית לטווח הקילומטראז' הנתון.
+חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
+החזר JSON בלבד:
+
+{{
+  "search_performed": true,
+  "score_breakdown": {{
+    "engine_transmission_score": "מספר (1-10)",
+    "electrical_score": "מספר (1-10)",
+    "suspension_brakes_score": "מספר (1-10)",
+    "maintenance_cost_score": "מספר (1-10)",
+    "satisfaction_score": "מספר (1-10)",
+    "recalls_score": "מספר (1-10)"
+  }},
+  "base_score_calculated": "מספר (0-100), מבוסס על המשקלות",
+  "common_issues": ["תקלות נפוצות בעברית (רלוונטיות לק\"מ)"],
+  "avg_repair_cost_ILS": "מספר ממוצע",
+  "issues_with_costs": [
+    {{"issue": "שם התקלה", "avg_cost_ILS": "מספר", "source": "מקור", "severity": "נמוך/בינוני/גבוה"}}
+  ],
+  "reliability_summary": "סיכום בעברית (להתייחס להשפעת הק\"מ)",
+  "sources": ["רשימת אתרים"],
+  "recommended_checks": ["בדיקות מומלצות ספציפיות לדגם זה במוסך"],
+  "common_competitors_brief": [
+      {{"model": "שם מתחרה 1", "brief_summary": "סיכום אמינות קצר של המתחרה"}},
+      {{"model": "שם מתחרה 2", "brief_summary": "סיכום אמינות קצר של המתחרה"}}
+  ]
+}}
+
+🧮 משקלות לחישוב base_score_calculated (מתוך 100):
+מנוע/גיר (35%), חשמל/אלקטרוניקה (20%), מתלים/בלמים (10%), עלות תחזוקה (15%), שביעות רצון (15%), ריקולים (5%).
+(הציון לכל קטגוריה הוא 1-10, תכפיל ב-10 כדי לקבל ציון מתוך 100 לכל קטגוריה לפני השקלול)
+
+רכב: {make} {model}{extra} {int(year)}
+טווח קילומטראז': {mileage_range}
+סוג דלק: {fuel_type}
+תיבת הילוכים: {transmission}
+כתוב בעברית בלבד.
+""".strip()
+
 def call_model_with_retry(prompt: str):
     """Try PRIMARY_MODEL then FALLBACK with retries & backoff. Returns parsed JSON (dict) or raises."""
     models_chain = [PRIMARY_MODEL, FALLBACK_MODEL]
@@ -378,53 +392,9 @@ def call_model_with_retry(prompt: str):
     raise RuntimeError(f"All model attempts failed. Last error: {repr(last_err)}")
 
 # =========================
-# ======== UI INPUTS ======
-# =========================
-st.markdown("### 🔍 בחירת יצרן, דגם ותת-דגם")
-
-make_list = sorted(israeli_car_market_full_compilation.keys())
-make_choice = st.selectbox("בחר יצרן:", ["בחר..."] + make_list, index=0)
-make_input  = st.text_input("או הזן יצרן ידנית (עד 30 תווים):", max_chars=MAX_LEN)
-selected_make = (make_choice if make_choice != "בחר..." else make_input).strip()
-
-selected_model = ""
-year_range = None
-if selected_make in israeli_car_market_full_compilation:
-    models = israeli_car_market_full_compilation[selected_make]
-    model_choice = st.selectbox("בחר דגם:", ["בחר דגם..." + ""] + models, index=0)  # avoid None
-    model_input  = st.text_input("או הזן דגם ידנית (עד 30 תווים):", max_chars=MAX_LEN)
-    selected_model = (model_choice if model_choice != "בחר דגם..." else model_input).strip()
-    if selected_model:
-        yr_start, yr_end = parse_year_range_from_model_label(selected_model)
-        if yr_start and yr_end:
-            year_range = (yr_start, yr_end)
-else:
-    if selected_make:
-        model_input  = st.text_input("שם דגם (עד 30 תווים):", max_chars=MAX_LEN)
-        selected_model = model_input.strip()
-
-sub_model = st.text_input("תת-דגם / תצורה (חופשי, עד 30 תווים):", max_chars=MAX_LEN).strip()
-
-if year_range:
-    year = st.number_input(f"שנת ייצור ({year_range[0]}–{year_range[1]}):", min_value=year_range[0], max_value=year_range[1], step=1)
-else:
-    year = st.number_input("שנת ייצור:", min_value=1960, max_value=2025, step=1)
-
-mileage_ranges = ["עד 50,000 ק\"מ", "50,000 - 100,000 ק\"מ", "100,000 - 150,000 ק\"מ", "150,000 - 200,000 ק\"מ", "200,000+ ק\"מ"]
-mileage_range = st.selectbox("טווח קילומטראז':", mileage_ranges)
-
-col1, col2 = st.columns(2)
-with col1:
-    fuel_type = st.selectbox("סוג דלק:", ["בנזין", "דיזל", "היברידי", "חשמלי", "אחר"])
-with col2:
-    transmission = st.selectbox("תיבת הילוכים:", ["אוטומטית", "ידנית"])
-
-st.markdown("---")
-
-# =========================
 # ======== Render =========
 # =========================
-def render_like_model(parsed_data: dict, source_tag: str, km_warn: bool = False):
+def render_like_model(parsed_data: dict, source_tag: str, km_warn: bool = False, mileage_note: Optional[str] = None):
     base_score = int(parsed_data.get("base_score_calculated", 0) or 0)
     summary = parsed_data.get("reliability_summary", "") or ""
     score_breakdown = parsed_data.get("score_breakdown", {}) or {}
@@ -434,10 +404,13 @@ def render_like_model(parsed_data: dict, source_tag: str, km_warn: bool = False)
     competitors = parsed_data.get("common_competitors_brief", []) or []
     avg_cost = parsed_data.get("avg_repair_cost_ILS", None)
 
-    if km_warn:
-        st.warning("⚠️ שימו לב — טווח הק״מ שונה מהנתון שהוזן\nייתכן שהציון גבוה/נמוך יותר בהתאם לקילומטראז'")
-
     st.metric(label="ציון אמינות משוקלל", value=f"{base_score} / 100")
+
+    if km_warn:
+        st.warning("⚠️ שימו לב — טווח הק״מ שונה מהנתון שהוזן. ייתכן שהציון גבוה/נמוך יותר בהתאם לקילומטראז'.")
+    if mileage_note:
+        st.info(mileage_note)
+
     if summary:
         st.write(summary)
 
@@ -505,8 +478,8 @@ def render_like_model(parsed_data: dict, source_tag: str, km_warn: bool = False)
 # =========================
 # === Mileage Apply/Notes =
 # =========================
-def apply_mileage_logic(result_obj: dict, requested_mileage: str):
-    delta, _ = mileage_adjustment(requested_mileage)
+def apply_mileage_logic(result_obj: dict, requested_mileage: str) -> Tuple[dict, Optional[str]]:
+    delta, note = mileage_adjustment(requested_mileage)
     if delta != 0:
         try:
             base = int(result_obj.get("base_score_calculated") or 0)
@@ -514,135 +487,35 @@ def apply_mileage_logic(result_obj: dict, requested_mileage: str):
             base = 0
         new_base = max(0, min(100, base + delta))
         result_obj["base_score_calculated"] = new_base
-        summary = result_obj.get("reliability_summary", "") or ""
-        addendum = " (הציון הותאם בהתאם לטווח הק״מ)."
-        if addendum not in summary:
-            result_obj["reliability_summary"] = (summary + addendum).strip()
-    return result_obj
+    return result_obj, note
 
 # =========================
-# ======== RUN ============
+# =========== UI ==========
 # =========================
-if st.button("בדוק אמינות"):
-    try:
-        if not selected_make or not selected_model:
-            st.error("יש להזין שם יצרן ודגם.")
-            st.stop()
 
-        # רק הגבלת אורך 30 תווים (אין בדיקות תווים נוספות)
-        try:
-            check_len_or_stop(selected_make, selected_model, sub_model)
-        except Exception as e:
-            st.error(str(e))
-            st.stop()
+# מצב — ידני/ברירת מחדל
+if "advanced_mode" not in st.session_state:
+    st.session_state.advanced_mode = False
 
-        # מגבלת מערכת יומית
-        df_all = sheet_to_df()
-        ok_global, total_global = within_daily_global_limit(df_all, limit=GLOBAL_DAILY_LIMIT)
-        if not ok_global:
-            st.error(f"חציתם את מגבלת {GLOBAL_DAILY_LIMIT} הבדיקות היומיות (בוצעו {total_global}). נסו מחר.")
-            st.stop()
+# מתג למעלה (לפי בקשתך שנבחר מיקום מיטבי)
+mode_col1, mode_col2 = st.columns([1, 2])
+with mode_col1:
+    if st.button("⚙️ מצב מתקדם — הזנה חופשית", type="secondary"):
+        st.session_state.advanced_mode = not st.session_state.advanced_mode
+with mode_col2:
+    st.caption("ברירת מחדל: בחירה מרשימות + תת־דגם חופשי • במצב מתקדם: הזנת יצרן/דגם/שנה ידנית")
 
-        # Cache קודם (עם A→B fallback + mileage גמיש)
-        cached_parsed, _, used_fallback, mileage_matched = get_cached_from_sheet(
-            selected_make, selected_model, sub_model, int(year), mileage_range, max_days=45
-        )
-        if cached_parsed:
-            tag = "✅ מקור: נתון קיים מהמאגר"
-            if used_fallback and sub_model:
-                tag += " (נמצאה התאמה לפי דגם בלבד)"
-            last_date = cached_parsed.get("last_date","")
-            if last_date:
-                tag += f" (נבדק: {last_date}). לא בוצעה פנייה למודל."
-            else:
-                tag += ". לא בוצעה פנייה למודל."
+st.markdown("### 🔍 בחירת יצרן, דגם ותת-דגם")
 
-            # התאמות ק״מ + אזהרה אם לא תואם
-            cached_parsed = apply_mileage_logic(cached_parsed, mileage_range)
-            km_warn = not mileage_matched
-            render_like_model(cached_parsed, tag, km_warn=km_warn)
-            st.stop()
+# קלטים משותפים
+mileage_ranges = ["עד 50,000 ק\"מ", "50,000 - 100,000 ק\"מ", "100,000 - 150,000 ק\"מ", "150,000 - 200,000 ק\"מ", "200,000+ ק\"מ"]
+col_top1, col_top2 = st.columns(2)
+with col_top1:
+    mileage_range = st.selectbox("טווח קילומטראז':", mileage_ranges, index=2)
+with col_top2:
+    fuel_type = st.selectbox("סוג דלק:", ["בנזין", "דיזל", "היברידי", "חשמלי", "אחר"], index=0)
 
-        # אין Cache → קריאה למודל (רק כאן יש spinner)
-        prompt = build_prompt(selected_make, selected_model, sub_model, int(year), fuel_type, transmission, mileage_range)
-        try:
-            parsed = call_model_with_retry(prompt)
-        except Exception as e:
-            st.error("⚠️ המודל לא הצליח להחזיר תוצאה כרגע.")
-            st.code(repr(e))
-            st.code(traceback.format_exc())
-            st.stop()
+transmission = st.selectbox("תיבת הילוכים:", ["אוטומטית", "ידנית"], index=0)
 
-        # Normalize
-        score_breakdown = parsed.get("score_breakdown", {}) or {}
-        base_calc = parsed.get("base_score_calculated")
-        if base_calc in [None, "", "nan"]:
-            legacy = parsed.get("base_score", 0)
-            try:
-                base_calc = int(round(float(legacy)))
-            except Exception:
-                base_calc = 0
-
-        result_obj = {
-            "score_breakdown": score_breakdown,
-            "base_score_calculated": int(base_calc or 0),
-            "common_issues": parsed.get("common_issues", []) or [],
-            "avg_repair_cost_ILS": parsed.get("avg_repair_cost_ILS", 0),
-            "issues_with_costs": parsed.get("issues_with_costs", []) or [],
-            "reliability_summary": parsed.get("reliability_summary", "אין מידע."),
-            "sources": parsed.get("sources", []) or [],
-            "recommended_checks": parsed.get("recommended_checks", []) or [],
-            "common_competitors_brief": parsed.get("common_competitors_brief", []) or []
-        }
-
-        # התאמות ק״מ
-        result_obj = apply_mileage_logic(result_obj, mileage_range)
-
-        # הצגה
-        render_like_model(result_obj, "🌐 מקור: חיפוש בזמן אמת (Gemini)", km_warn=False)
-
-        # כתיבה למאגר
-        try:
-            issues_str = "; ".join(result_obj["common_issues"]) if isinstance(result_obj["common_issues"], list) else str(result_obj["common_issues"])
-            issues_with_costs_str = json.dumps(result_obj["issues_with_costs"], ensure_ascii=False)
-            sources_str = json.dumps(result_obj["sources"], ensure_ascii=False) if isinstance(result_obj["sources"], list) else str(result_obj["sources"])
-            score_breakdown_str = json.dumps(result_obj["score_breakdown"], ensure_ascii=False) if isinstance(result_obj["score_breakdown"], dict) else str(result_obj["score_breakdown"])
-            recommended_checks_str = json.dumps(result_obj["recommended_checks"], ensure_ascii=False)
-            competitors_str = json.dumps(result_obj["common_competitors_brief"], ensure_ascii=False)
-        except Exception:
-            issues_str = str(result_obj["common_issues"])
-            issues_with_costs_str = str(result_obj["issues_with_costs"])
-            sources_str = str(result_obj["sources"])
-            score_breakdown_str = str(result_obj["score_breakdown"])
-            recommended_checks_str = str(result_obj["recommended_checks"])
-            competitors_str = str(result_obj["common_competitors_brief"])
-
-        append_row_to_sheet({
-            "date": datetime.date.today().isoformat(),
-            "user_id": "anonymous",
-            "make": normalize_text(selected_make),
-            "model": normalize_text(selected_model),
-            "sub_model": normalize_text(sub_model),
-            "year": int(year),
-            "fuel": fuel_type,
-            "transmission": transmission,
-            "mileage_range": mileage_range,
-            "base_score_calculated": int(result_obj["base_score_calculated"] or 0),
-            "score_breakdown": score_breakdown_str,
-            "avg_cost": result_obj["avg_repair_cost_ILS"],
-            "issues": issues_str,
-            "search_performed": "true",
-            "reliability_summary": result_obj["reliability_summary"],
-            "issues_with_costs": issues_with_costs_str,
-            "sources": sources_str,
-            "recommended_checks": recommended_checks_str,
-            "common_competitors_brief": competitors_str
-        })
-
-    except Exception as outer_e:
-        st.error("שגיאה כללית במהלך ההרצה.")
-        st.code(repr(outer_e))
-        st.code(traceback.format_exc())
-
-st.markdown("---")
-st.caption("כל המידע מוצג כשירות עזר בלבד — אין לראות בתוצאה המלצה מקצועית.")
+# === מצב ברירת מחדל (רשימות) ===
+if not st.session_state.adv
