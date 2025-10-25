@@ -20,9 +20,16 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
 GOOGLE_SHEET_ID = st.secrets.get("GOOGLE_SHEET_ID")
 GOOGLE_CREDENTIALS = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-if not GEMINI_API_KEY or not GOOGLE_SHEET_ID or not GOOGLE_CREDENTIALS:
-    st.error("⚠️ חסרים Secrets: GEMINI_API_KEY, GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_JSON")
+try:
+    GOOGLE_SERVICE_ACCOUNT_INFO = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+except Exception:
+    st.error("⚠️ GOOGLE_SERVICE_ACCOUNT_JSON אינו JSON תקין ב-Secrets")
     st.stop()
+
+credentials = Credentials.from_service_account_info(
+    GOOGLE_SERVICE_ACCOUNT_INFO,
+    scopes=["https://www.googleapis.com/auth/spreadsheets"]
+)
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
