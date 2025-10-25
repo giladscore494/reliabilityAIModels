@@ -562,20 +562,19 @@ if st.button("בדוק אמינות"):
         render_like_model(cached_parsed, tag, notes)
         st.stop()
 
-    # אין Cache → קריאה למודל
-    prompt = build_prompt(selected_make, selected_model, sub_model, int(year), fuel_type, transmission, mileage_range)
-    try:
-        with st.spinner("מבצע חיפוש אינטרנטי ומחשב ציון..."):
-            resp = llm.generate_content(prompt)
-            raw = (getattr(resp, "text", "") or "").strip()
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-            parsed = json.loads(m.group()) if m else json.loads(repair_json(raw))
-   except Exception as e:
+ # אין Cache → קריאה למודל
+prompt = build_prompt(selected_make, selected_model, sub_model, int(year), fuel_type, transmission, mileage_range)
+try:
+    with st.spinner("מבצע חיפוש אינטרנטי ומחשב ציון..."):
+        resp = llm.generate_content(prompt)
+        raw = (getattr(resp, "text", "") or "").strip()
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        parsed = json.loads(m.group()) if m else json.loads(repair_json(raw))
+except Exception as e:
     st.error("שגיאה בעיבוד תשובת המודל.")
     st.code(repr(e))
     st.code(traceback.format_exc())
     st.stop()
-
 
     # נרמול פלט (תמיכה אם המודל עדיין החזיר base_score בלבד)
     score_breakdown = parsed.get("score_breakdown", {}) or {}
