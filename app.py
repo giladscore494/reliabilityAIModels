@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-# Car Reliability Analyzer – Israel (v3.7.0)
+# Car Reliability Analyzer – Israel (v3.8.1 • Production Clean)
 # Sheets + 45d Cache • No auth/signup • 30-char input limit
 # Free-text sub-model + A→B fallback (try sub-model; else model-only)
-# DEBUG FULL • Retry + Fallback • Safe JSON • No silent resets
-# Mileage: flexible matching + warning on mismatch • Score penalty by km-range
+# Mileage: flexible matching + explicit mismatch warning • Score penalty by km-range
+# No debug prints • No pre-run of model (only inside button)
 
 import json, re, time, datetime, difflib, traceback
 import pandas as pd
@@ -14,7 +14,6 @@ import google.generativeai as genai
 # =========================
 # ====== CONFIG/FLAGS =====
 # =========================
-DEBUG = True  # DEBUG FULL (set False for production-clean UI)
 PRIMARY_MODEL = "gemini-2.5-flash"
 FALLBACK_MODEL = "gemini-1.5-flash-latest"
 RETRIES = 2
@@ -49,17 +48,6 @@ from car_models_dict import israeli_car_market_full_compilation
 # =========================
 # ===== Helper funcs ======
 # =========================
-def dlog(msg, *args):
-    """Debug logger to UI."""
-    if DEBUG:
-        if args:
-            try:
-                st.write("DEBUG:", msg, *args)
-            except Exception:
-                st.write("DEBUG:", str(msg))
-        else:
-            st.write("DEBUG:", msg)
-
 def normalize_text(s: str) -> str:
     if s is None:
         return ""
@@ -173,7 +161,6 @@ def connect_sheet():
         current = ws.row_values(1)
         if [c.lower() for c in current] != REQUIRED_HEADERS:
             ws.update("A1", [REQUIRED_HEADERS], value_input_option="USER_ENTERED")
-        dlog("Sheets connected and headers ensured.")
         return ws
     except Exception as e:
         st.error("אין חיבור למאגר (שיתוף/הרשאות/Sheet).")
@@ -201,7 +188,6 @@ def append_row_to_sheet(row_dict: dict):
     row = [row_dict.get(k, "") for k in REQUIRED_HEADERS]
     try:
         ws.append_row(row, value_input_option="USER_ENTERED")
-        dlog("Row appended to sheet.")
     except Exception as e:
         st.error("כשל בכתיבה למאגר.")
         st.code(repr(e))
@@ -367,12 +353,10 @@ def call_model_with_retry(prompt: str):
     models_chain = [PRIMARY_MODEL, FALLBACK_MODEL]
     last_err = None
     for model_name in models_chain:
-        dlog("Model attempt:", model_name)
         try:
             llm = genai.GenerativeModel(model_name)
         except Exception as e:
             last_err = e
-            dlog("Model init failed:", repr(e))
             continue
 
         for attempt in range(1, RETRIES + 1):
@@ -380,22 +364,17 @@ def call_model_with_retry(prompt: str):
                 with st.spinner(f"פונה למודל {model_name} (ניסיון {attempt}/{RETRIES})..."):
                     resp = llm.generate_content(prompt)
                 raw = (getattr(resp, "text", "") or "").strip()
-                dlog("Raw length:", len(raw))
-                # Try strict JSON -> then repair
                 try:
                     m = re.search(r"\{.*\}", raw, re.DOTALL)
                     data = json.loads(m.group()) if m else json.loads(raw)
                 except Exception:
                     data = json.loads(repair_json(raw))
-                dlog("JSON parsed OK.")
                 return data
             except Exception as e:
                 last_err = e
-                dlog(f"Attempt {attempt} failed:", repr(e))
                 if attempt < RETRIES:
                     time.sleep(RETRY_BACKOFF_SEC)
                 continue
-    # If reached here -> all failed
     raise RuntimeError(f"All model attempts failed. Last error: {repr(last_err)}")
 
 # =========================
@@ -412,7 +391,7 @@ selected_model = ""
 year_range = None
 if selected_make in israeli_car_market_full_compilation:
     models = israeli_car_market_full_compilation[selected_make]
-    model_choice = st.selectbox("בחר דגם:", ["בחר דגם..."] + models, index=0)
+    model_choice = st.selectbox("בחר דגם:", ["בחר דגם..." + ""] + models, index=0)  # avoid None
     model_input  = st.text_input("או הזן דגם ידנית (עד 30 תווים):", max_chars=MAX_LEN)
     selected_model = (model_choice if model_choice != "בחר דגם..." else model_input).strip()
     if selected_model:
@@ -445,10 +424,7 @@ st.markdown("---")
 # =========================
 # ======== Render =========
 # =========================
-def render_like_model(parsed_data: dict, source_tag: str, extra_notes=None):
-    if extra_notes is None:
-        extra_notes = []
-
+def render_like_model(parsed_data: dict, source_tag: str, km_warn: bool = False):
     base_score = int(parsed_data.get("base_score_calculated", 0) or 0)
     summary = parsed_data.get("reliability_summary", "") or ""
     score_breakdown = parsed_data.get("score_breakdown", {}) or {}
@@ -458,12 +434,12 @@ def render_like_model(parsed_data: dict, source_tag: str, extra_notes=None):
     competitors = parsed_data.get("common_competitors_brief", []) or []
     avg_cost = parsed_data.get("avg_repair_cost_ILS", None)
 
-    st.metric(label="ציון אמינות משוקלל", value=f"{base_score} / 100")
+    if km_warn:
+        st.warning("⚠️ שימו לב — טווח הק״מ שונה מהנתון שהוזן\nייתכן שהציון גבוה/נמוך יותר בהתאם לקילומטראז'")
 
+    st.metric(label="ציון אמינות משוקלל", value=f"{base_score} / 100")
     if summary:
         st.write(summary)
-    if extra_notes:
-        st.warning(" ; ".join([str(n) for n in extra_notes if n]))
 
     tab1, tab2, tab3, tab4 = st.tabs(["פירוט הציון", "תקלות ועלויות", "בדיקות מומלצות", "מתחרים"])
 
@@ -479,10 +455,6 @@ def render_like_model(parsed_data: dict, source_tag: str, extra_notes=None):
             c3.metric("ריקולים", f"{score_breakdown.get('recalls_score', 'N/A')}/10")
         else:
             st.info("אין נתוני פירוט ציון זמינים מהמאגר לרכב זה.")
-        if extra_notes:
-            st.markdown("**הערות חישוב הק״מ:**")
-            for n in extra_notes:
-                st.markdown(f"- {n}")
 
     with tab2:
         if issues_list:
@@ -533,12 +505,8 @@ def render_like_model(parsed_data: dict, source_tag: str, extra_notes=None):
 # =========================
 # === Mileage Apply/Notes =
 # =========================
-def apply_mileage_logic_and_notes(result_obj: dict, requested_mileage: str, came_from_cache: bool, mileage_matched: bool, cached_mileage: str|None):
-    notes = []
-    if came_from_cache and not mileage_matched:
-        notes.append("⚠️ טווח הק״מ במאגר לא תאם להזנה — מוצג מידע משוער. (ק״מ במאגר: " + (cached_mileage or "לא ידוע") + ")")
-
-    delta, note = mileage_adjustment(requested_mileage)
+def apply_mileage_logic(result_obj: dict, requested_mileage: str):
+    delta, _ = mileage_adjustment(requested_mileage)
     if delta != 0:
         try:
             base = int(result_obj.get("base_score_calculated") or 0)
@@ -546,142 +514,132 @@ def apply_mileage_logic_and_notes(result_obj: dict, requested_mileage: str, came
             base = 0
         new_base = max(0, min(100, base + delta))
         result_obj["base_score_calculated"] = new_base
-        if note:
-            notes.append(note)
         summary = result_obj.get("reliability_summary", "") or ""
         addendum = " (הציון הותאם בהתאם לטווח הק״מ)."
         if addendum not in summary:
             result_obj["reliability_summary"] = (summary + addendum).strip()
-    return result_obj, notes
+    return result_obj
 
 # =========================
-# ========= Run ===========
+# ======== RUN ============
 # =========================
 if st.button("בדוק אמינות"):
     try:
-        dlog("Run started.")
         if not selected_make or not selected_model:
             st.error("יש להזין שם יצרן ודגם.")
-            dlog("Missing make/model.")
-        else:
-            dlog(f"Inputs -> make={selected_make}, model={selected_model}, sub_model={sub_model}, year={year}, mileage={mileage_range}, fuel={fuel_type}, trans={transmission}")
+            st.stop()
 
-        # בדיקות אורך
+        # רק הגבלת אורך 30 תווים (אין בדיקות תווים נוספות)
         try:
             check_len_or_stop(selected_make, selected_model, sub_model)
         except Exception as e:
             st.error(str(e))
-            dlog("Length check failed:", repr(e))
+            st.stop()
 
         # מגבלת מערכת יומית
         df_all = sheet_to_df()
         ok_global, total_global = within_daily_global_limit(df_all, limit=GLOBAL_DAILY_LIMIT)
-        dlog(f"Global quota -> ok={ok_global}, today={total_global}")
         if not ok_global:
             st.error(f"חציתם את מגבלת {GLOBAL_DAILY_LIMIT} הבדיקות היומיות (בוצעו {total_global}). נסו מחר.")
-        else:
-            # Cache קודם
-            dlog("Checking cache...")
-            cached_parsed, _, used_fallback, mileage_matched = get_cached_from_sheet(
-                selected_make, selected_model, sub_model, int(year), mileage_range, max_days=45
-            )
-            if cached_parsed:
-                tag = "✅ מקור: נתון קיים מהמאגר"
-                if used_fallback and sub_model:
-                    tag += " (נמצאה התאמה לפי דגם בלבד)"
-                last_date = cached_parsed.get("last_date","")
-                if last_date:
-                    tag += f" (נבדק: {last_date}). לא בוצעה פנייה למודל."
-                else:
-                    tag += ". לא בוצעה פנייה למודל."
-                # התאמות ק״מ + הערות
-                cached_parsed, notes = apply_mileage_logic_and_notes(
-                    cached_parsed, mileage_range, came_from_cache=True, mileage_matched=mileage_matched,
-                    cached_mileage=cached_parsed.get("cached_mileage_range")
-                )
-                render_like_model(cached_parsed, tag, notes)
-                dlog("Rendered from cache.")
+            st.stop()
+
+        # Cache קודם (עם A→B fallback + mileage גמיש)
+        cached_parsed, _, used_fallback, mileage_matched = get_cached_from_sheet(
+            selected_make, selected_model, sub_model, int(year), mileage_range, max_days=45
+        )
+        if cached_parsed:
+            tag = "✅ מקור: נתון קיים מהמאגר"
+            if used_fallback and sub_model:
+                tag += " (נמצאה התאמה לפי דגם בלבד)"
+            last_date = cached_parsed.get("last_date","")
+            if last_date:
+                tag += f" (נבדק: {last_date}). לא בוצעה פנייה למודל."
             else:
-                # אין Cache → מודל עם retry+fallback
-                dlog("No cache. Calling model...")
-                prompt = build_prompt(selected_make, selected_model, sub_model, int(year), fuel_type, transmission, mileage_range)
-                try:
-                    parsed = call_model_with_retry(prompt)
-                    # Normalize
-                    score_breakdown = parsed.get("score_breakdown", {}) or {}
-                    base_calc = parsed.get("base_score_calculated")
-                    if base_calc in [None, "", "nan"]:
-                        legacy = parsed.get("base_score", 0)
-                        try:
-                            base_calc = int(round(float(legacy)))
-                        except Exception:
-                            base_calc = 0
-                    result_obj = {
-                        "score_breakdown": score_breakdown,
-                        "base_score_calculated": int(base_calc or 0),
-                        "common_issues": parsed.get("common_issues", []) or [],
-                        "avg_repair_cost_ILS": parsed.get("avg_repair_cost_ILS", 0),
-                        "issues_with_costs": parsed.get("issues_with_costs", []) or [],
-                        "reliability_summary": parsed.get("reliability_summary", "אין מידע."),
-                        "sources": parsed.get("sources", []) or [],
-                        "recommended_checks": parsed.get("recommended_checks", []) or [],
-                        "common_competitors_brief": parsed.get("common_competitors_brief", []) or []
-                    }
-                    # התאמות ק״מ + הערות (ממודל — אין cached_mileage)
-                    result_obj, notes = apply_mileage_logic_and_notes(
-                        result_obj, mileage_range, came_from_cache=False, mileage_matched=True, cached_mileage=None
-                    )
-                    render_like_model(result_obj, "🌐 מקור: חיפוש בזמן אמת (Gemini)", notes)
+                tag += ". לא בוצעה פנייה למודל."
 
-                    # כתיבה למאגר
-                    try:
-                        issues_str = "; ".join(result_obj["common_issues"]) if isinstance(result_obj["common_issues"], list) else str(result_obj["common_issues"])
-                        issues_with_costs_str = json.dumps(result_obj["issues_with_costs"], ensure_ascii=False)
-                        sources_str = json.dumps(result_obj["sources"], ensure_ascii=False) if isinstance(result_obj["sources"], list) else str(result_obj["sources"])
-                        score_breakdown_str = json.dumps(result_obj["score_breakdown"], ensure_ascii=False) if isinstance(result_obj["score_breakdown"], dict) else str(result_obj["score_breakdown"])
-                        recommended_checks_str = json.dumps(result_obj["recommended_checks"], ensure_ascii=False)
-                        competitors_str = json.dumps(result_obj["common_competitors_brief"], ensure_ascii=False)
-                    except Exception:
-                        issues_str = str(result_obj["common_issues"])
-                        issues_with_costs_str = str(result_obj["issues_with_costs"])
-                        sources_str = str(result_obj["sources"])
-                        score_breakdown_str = str(result_obj["score_breakdown"])
-                        recommended_checks_str = str(result_obj["recommended_checks"])
-                        competitors_str = str(result_obj["common_competitors_brief"])
+            # התאמות ק״מ + אזהרה אם לא תואם
+            cached_parsed = apply_mileage_logic(cached_parsed, mileage_range)
+            km_warn = not mileage_matched
+            render_like_model(cached_parsed, tag, km_warn=km_warn)
+            st.stop()
 
-                    append_row_to_sheet({
-                        "date": datetime.date.today().isoformat(),
-                        "user_id": "anonymous",
-                        "make": normalize_text(selected_make),
-                        "model": normalize_text(selected_model),
-                        "sub_model": normalize_text(sub_model),
-                        "year": int(year),
-                        "fuel": fuel_type,
-                        "transmission": transmission,
-                        "mileage_range": mileage_range,
-                        "base_score_calculated": int(result_obj["base_score_calculated"] or 0),
-                        "score_breakdown": score_breakdown_str,
-                        "avg_cost": result_obj["avg_repair_cost_ILS"],
-                        "issues": issues_str,
-                        "search_performed": "true",
-                        "reliability_summary": result_obj["reliability_summary"],
-                        "issues_with_costs": issues_with_costs_str,
-                        "sources": sources_str,
-                        "recommended_checks": recommended_checks_str,
-                        "common_competitors_brief": competitors_str
-                    })
-                    dlog("Saved model result to sheet.")
+        # אין Cache → קריאה למודל (רק כאן יש spinner)
+        prompt = build_prompt(selected_make, selected_model, sub_model, int(year), fuel_type, transmission, mileage_range)
+        try:
+            parsed = call_model_with_retry(prompt)
+        except Exception as e:
+            st.error("⚠️ המודל לא הצליח להחזיר תוצאה כרגע.")
+            st.code(repr(e))
+            st.code(traceback.format_exc())
+            st.stop()
 
-                except Exception as e:
-                    st.error("⚠️ המודל לא הצליח להחזיר תוצאה כרגע.")
-                    st.code(repr(e))
-                    st.code(traceback.format_exc())
-                    st.info("מומלץ לנסות שוב בעוד מספר שניות. אם התקלה נמשכת — יתכן עומס זמני ב-API.")
-                    dlog("Model failed; no cache to show.")
+        # Normalize
+        score_breakdown = parsed.get("score_breakdown", {}) or {}
+        base_calc = parsed.get("base_score_calculated")
+        if base_calc in [None, "", "nan"]:
+            legacy = parsed.get("base_score", 0)
+            try:
+                base_calc = int(round(float(legacy)))
+            except Exception:
+                base_calc = 0
 
-        dlog("Run finished.")
+        result_obj = {
+            "score_breakdown": score_breakdown,
+            "base_score_calculated": int(base_calc or 0),
+            "common_issues": parsed.get("common_issues", []) or [],
+            "avg_repair_cost_ILS": parsed.get("avg_repair_cost_ILS", 0),
+            "issues_with_costs": parsed.get("issues_with_costs", []) or [],
+            "reliability_summary": parsed.get("reliability_summary", "אין מידע."),
+            "sources": parsed.get("sources", []) or [],
+            "recommended_checks": parsed.get("recommended_checks", []) or [],
+            "common_competitors_brief": parsed.get("common_competitors_brief", []) or []
+        }
+
+        # התאמות ק״מ
+        result_obj = apply_mileage_logic(result_obj, mileage_range)
+
+        # הצגה
+        render_like_model(result_obj, "🌐 מקור: חיפוש בזמן אמת (Gemini)", km_warn=False)
+
+        # כתיבה למאגר
+        try:
+            issues_str = "; ".join(result_obj["common_issues"]) if isinstance(result_obj["common_issues"], list) else str(result_obj["common_issues"])
+            issues_with_costs_str = json.dumps(result_obj["issues_with_costs"], ensure_ascii=False)
+            sources_str = json.dumps(result_obj["sources"], ensure_ascii=False) if isinstance(result_obj["sources"], list) else str(result_obj["sources"])
+            score_breakdown_str = json.dumps(result_obj["score_breakdown"], ensure_ascii=False) if isinstance(result_obj["score_breakdown"], dict) else str(result_obj["score_breakdown"])
+            recommended_checks_str = json.dumps(result_obj["recommended_checks"], ensure_ascii=False)
+            competitors_str = json.dumps(result_obj["common_competitors_brief"], ensure_ascii=False)
+        except Exception:
+            issues_str = str(result_obj["common_issues"])
+            issues_with_costs_str = str(result_obj["issues_with_costs"])
+            sources_str = str(result_obj["sources"])
+            score_breakdown_str = str(result_obj["score_breakdown"])
+            recommended_checks_str = str(result_obj["recommended_checks"])
+            competitors_str = str(result_obj["common_competitors_brief"])
+
+        append_row_to_sheet({
+            "date": datetime.date.today().isoformat(),
+            "user_id": "anonymous",
+            "make": normalize_text(selected_make),
+            "model": normalize_text(selected_model),
+            "sub_model": normalize_text(sub_model),
+            "year": int(year),
+            "fuel": fuel_type,
+            "transmission": transmission,
+            "mileage_range": mileage_range,
+            "base_score_calculated": int(result_obj["base_score_calculated"] or 0),
+            "score_breakdown": score_breakdown_str,
+            "avg_cost": result_obj["avg_repair_cost_ILS"],
+            "issues": issues_str,
+            "search_performed": "true",
+            "reliability_summary": result_obj["reliability_summary"],
+            "issues_with_costs": issues_with_costs_str,
+            "sources": sources_str,
+            "recommended_checks": recommended_checks_str,
+            "common_competitors_brief": competitors_str
+        })
+
     except Exception as outer_e:
-        # לא נשתיק שגיאה כללית — מציגים תמיד
         st.error("שגיאה כללית במהלך ההרצה.")
         st.code(repr(outer_e))
         st.code(traceback.format_exc())
