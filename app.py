@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 🇮🇱 Car Reliability Analyzer v2.3.0 (Sheets Only + Always-On Debug)
+# 🇮🇱 Car Reliability Analyzer v2.4.0 (Sheets Only + Always-On Debug)
 # ===========================================================
 # מה כלול:
 # - חיבור לגוגל שיטס דרך Service Account (מה-Secrets)
@@ -13,6 +13,10 @@
 #     * גלובלית: 1000 ליום
 #     * למשתמש: מבוטל (anonymous, לפי בחירתך "0")
 # - מודל: gemini-2.5-flash
+# - שדרוגים בגרסה זו:
+#     * הוספת Drive scope כדי לאפשר gc.open_by_key
+#     * דיאגנוסטיקה משופרת ל-PermissionError/403
+#     * וידוא/יצירת כותרות יציב גם כאשר השורה הראשונה ריקה/חלקית
 # ===========================================================
 
 import json, re, datetime, difflib, traceback
@@ -116,11 +120,15 @@ def run_connectivity_diagnostics():
     else:
         results.append(_ok("שדות חובה קיימים ב-JSON"))
 
-    # 4) יצירת Credentials
+    # 4) יצירת Credentials (עם Drive + Sheets)
     try:
         from google.oauth2.service_account import Credentials
         credentials = Credentials.from_service_account_info(
-            service_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+            service_info,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
         )
         results.append(_ok("יצירת Credentials מה־JSON"))
     except Exception as e:
@@ -144,15 +152,30 @@ def run_connectivity_diagnostics():
 
     # 6) פתיחת הגיליון לפי ID
     try:
+        # בדיקה מוקדמת – ID נראה תקין (אופציונלי)
+        if not isinstance(GOOGLE_SHEET_ID, str) or len(GOOGLE_SHEET_ID.strip()) < 30:
+            raise ValueError("Google Sheet ID נראה קצר מדי או ריק.")
         sh = gc.open_by_key(GOOGLE_SHEET_ID)
         results.append(_ok(f"פתיחת גיליון לפי ID ({GOOGLE_SHEET_ID})"))
     except Exception as e:
-        results.append(_fail(
-            "פתיחת גיליון לפי ID", "נכשל",
-            "שתף את הגיליון עם כתובת ה־client_email שב־Service Account (Viewer/Editor). "
-            f"client_email: {service_info.get('client_email','(לא ידוע)')}\n"
-            f"שגיאה: {repr(e)}"
-        ))
+        err_txt = repr(e)
+        if ("PERMISSION" in err_txt.upper()) or ("403" in err_txt) or ("insufficientPermissions" in err_txt):
+            results.append(_fail(
+                "פתיחת גיליון לפי ID", "PermissionError",
+                "🚫 הרשאת Drive חסרה או שגויה.\n"
+                "פתרון:\n"
+                "1️⃣ ודא שה-Service Account משותף כ-Editor לגיליון (לא רק Viewer).\n"
+                "2️⃣ ודא שהוספת את ה-scope של Drive בקוד (ראה שלב יצירת Credentials).\n"
+                f"client_email: {service_info.get('client_email','(לא ידוע)')}\n"
+                f"שגיאה: {err_txt}"
+            ))
+        else:
+            results.append(_fail(
+                "פתיחת גיליון לפי ID", "נכשל",
+                "שתף את הגיליון עם כתובת ה־client_email שב־Service Account (Viewer/Editor). "
+                f"client_email: {service_info.get('client_email','(לא ידוע)')}\n"
+                f"שגיאה: {err_txt}"
+            ))
         return results, None, None, None
 
     # 7) worksheet ראשון
@@ -166,15 +189,18 @@ def run_connectivity_diagnostics():
         ))
         return results, sh, None, None
 
-    # 8) כותרות חובה
+    # 8) כותרות חובה (וידוא/יצירה יציבה)
     try:
         headers = [
             "date","user_id","make","model","year","fuel","transmission",
             "base_score","avg_cost","issues","search_performed"
         ]
+        # קרא את השורה הראשונה; אם ריקה/חלקית – נשכתב תקין
         current = ws.row_values(1)
-        if [h.lower() for h in current] != headers:
-            ws.update("A1", [headers])
+        # הפוך לרשימה באורך הכותרות (מילוי בריקים)
+        current_lower = [c.lower() for c in current] if current else []
+        if current_lower != headers:
+            ws.update("A1", [headers], value_input_option="USER_ENTERED")
         results.append(_ok("וידוא כותרות בגיליון"))
     except Exception as e:
         results.append(_fail(
@@ -481,18 +507,4 @@ if st.button("בדוק אמינות"):
             "date": datetime.date.today().isoformat(),
             "user_id": "anonymous",
             "make": normalize_text(selected_make),
-            "model": normalize_text(selected_model),
-            "year": int(year),
-            "fuel": fuel_type,
-            "transmission": transmission,
-            "base_score": base_score,
-            "avg_cost": avg_cost,
-            "issues": "; ".join(issues) if isinstance(issues, list) else str(issues),
-            "search_performed": str(bool(search_flag)).lower()
-        })
-        st.info("💾 נשמר לשיטס בהצלחה.")
-
-    except Exception as e:
-        st.error("שגיאה בעיבוד הבקשה:")
-        st.code(repr(e))
-        st.code(traceback.format_exc())
+            "mode
