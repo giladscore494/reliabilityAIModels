@@ -176,7 +176,12 @@ def match_hits(recent: pd.DataFrame, year: int, make: str, model: str, sub_model
     ]
     if use_sub and "sub_model" in recent.columns:
         cand = cand[cand["sub_model"].apply(lambda x: similarity(x, sm) >= th)]
-    return cand.sort_values("date")
+
+    # ✅ FIX: למנוע KeyError אם אין "date"
+    if "date" in cand.columns:
+        return cand.sort_values("date")
+    else:
+        return cand
 
 def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, max_days=45):
     df = sheet_to_df()
@@ -219,7 +224,7 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, max_
             "issues_with_costs": safe_json_parse(last_row.get("issues_with_costs")) or [],
             "reliability_summary": last_row.get("reliability_summary") or "",
             "search_performed": "true (history aggregate)",
-            "last_date": str(hits.iloc[-1]["date"].date()),
+            "last_date": str(hits.iloc[-1]["date"].date()) if "date" in hits.columns else "",
             "sources": last_row.get("sources","")
         }, df, used_fallback
 
@@ -228,7 +233,7 @@ def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, max_
     row["count"] = int(len(hits))
     row["issues_with_costs"] = safe_json_parse(row.get("issues_with_costs")) or []
     row["reliability_summary"] = row.get("reliability_summary") or ""
-    row["last_date"] = str(hits.iloc[-1]["date"].date())
+    row["last_date"] = str(hits.iloc[-1]["date"].date()) if "date" in hits.columns else ""
     return row, df, used_fallback
 
 # ---------- UI ----------
