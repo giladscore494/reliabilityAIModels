@@ -31,20 +31,29 @@ model = genai.GenerativeModel("gemini-2.5-flash")
 from car_models_dict import israeli_car_market_full_compilation
 
 # ==== Google Sheets ====
+# ==== Google Sheets ====
 try:
     import gspread
     from google.oauth2.service_account import Credentials
 
+    # חשוב! להמיר את ה-String ל-Dict
+    service_info = json.loads(GOOGLE_CREDENTIALS)
+
     credentials = Credentials.from_service_account_info(
-        GOOGLE_CREDENTIALS,
+        service_info,
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
     gc = gspread.authorize(credentials)
     sh = gc.open_by_key(GOOGLE_SHEET_ID)
     ws = sh.sheet1
+
+    st.success("✅ חיבור ל-Google Sheets הצליח!")
+
 except Exception as e:
-    st.error(f"❌ כשל בחיבור לגיליון: {e}")
+    st.error(f"❌ כשל בחיבור לגיליון:")
+    st.code(str(e))
     st.stop()
+
 
 # ==== Helpers ====
 def sheet_to_df():
