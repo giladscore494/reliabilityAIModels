@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
-# ===========================================================
-# 🇮🇱 Car Reliability Analyzer v3.1.0
+# Car Reliability Analyzer – Israel (v3.1.2)
 # Sheets + Minimal Connect Banner + Smart 45d Cache + No Auth
-# תצוגת תוצאה מהמאגר זהה לפורמט של תשובת המודל
-# ===========================================================
+# Shows cached results EXACTLY like live model responses
 
 import json, re, datetime, difflib, traceback
 import pandas as pd
@@ -28,7 +26,6 @@ genai.configure(api_key=GEMINI_API_KEY)
 llm = genai.GenerativeModel("gemini-2.5-flash")
 
 # ---------------- Models dictionary ----------------
-# נדרש בקובץ נפרד אצלך כפי שעבד עד עכשיו
 from car_models_dict import israeli_car_market_full_compilation
 
 # ---------------- Helpers ----------------
@@ -36,7 +33,7 @@ def normalize_text(s: str) -> str:
     if s is None:
         return ""
     s = re.sub(r"\(.*?\)", " ", str(s))
-    s = re.sub(r"[^0-9A-Za-zא-ת]+", " ", s)
+    s = re.sub(r"[^0-9A-Za-zא-ת\- ]+", " ", s)  # הסר תווים לא חוקיים
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
@@ -118,7 +115,7 @@ def connect_sheet():
         gc = gspread.authorize(credentials)
         sh = gc.open_by_key(GOOGLE_SHEET_ID)
         ws = sh.sheet1
-        # ודא כותרות (הרחבנו עמודות כדי לשמור תצוגה מלאה)
+        # ודא כותרות – כולל שדות תצוגה מלאה זהים למודל
         headers = [
             "date","user_id","make","model","year","fuel","transmission",
             "base_score","avg_cost","issues","search_performed",
@@ -177,7 +174,7 @@ def within_daily_global_limit(df: pd.DataFrame, limit=GLOBAL_DAILY_LIMIT):
 def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     """
     קשיח: אם קיימת אפילו תוצאה אחת מ-≤45 יום → נחזיר מייד (ללא Gemini).
-    אם 3+ תוצאות → נחזיר ממוצע יציב לבסיס (base_cost/avg_cost) + תצוגת issues אחרונות.
+    אם 3+ תוצאות → נחזיר ממוצע יציב לבסיס (base_score/avg_cost) + תצוגת issues אחרונות.
     ההתאמה: שנתון 1:1, similarity ליצרן/דגם: קודם 0.97 ואז 0.93 עם normalize.
     """
     df = sheet_to_df()
@@ -211,12 +208,11 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     if hits.empty:
         return None, df
 
-    # 3+ → ממוצע יציב לבסיס; תצוגה זהה ככל הניתן
+    # 3+ → ממוצע יציב; תצוגה מקסימלית לפי הרשומה האחרונה
     if len(hits) >= 3:
         base_score_series = pd.to_numeric(hits["base_score"], errors="coerce").dropna()
         avg_cost_series  = pd.to_numeric(hits["avg_cost"], errors="coerce").dropna()
         issues_tail = "; ".join([str(x) for x in hits["issues"].astype(str).tail(3)])
-        # עלויות מפורטות: אין היגיון ממוצע; נציג רק אם לשורה האחרונה יש
         last_row = hits.iloc[-1].to_dict()
         issues_with_costs = safe_json_parse(last_row.get("issues_with_costs"))
         reliability_summary = last_row.get("reliability_summary") or ""
@@ -225,7 +221,7 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
             "count": int(len(hits)),
             "base_score": int(round(base_score_series.mean())) if not base_score_series.empty else None,
             "avg_cost": int(round(avg_cost_series.mean())) if not avg_cost_series.empty else None,
-            "issues": issues_tail,  # מחרוזת; נפרק להצגה
+            "issues": issues_tail,
             "issues_with_costs": issues_with_costs if isinstance(issues_with_costs, list) else [],
             "reliability_summary": reliability_summary,
             "search_performed": "true (history aggregate)",
@@ -237,19 +233,40 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     row = hits.iloc[-1].to_dict()
     row["is_aggregate"] = False
     row["count"] = int(len(hits))
-    # וודא פענוח השדות המורכבים
     row["issues_with_costs"] = safe_json_parse(row.get("issues_with_costs")) or []
     row["reliability_summary"] = row.get("reliability_summary") or ""
     row["last_date"] = str(hits.iloc[-1]["date"].date())
     return row, df
 
-# ---------------- UI Selection ----------------
+# ---------------- UI Selection (with strict manual input limits) ----------------
 st.markdown("### 🔍 בחירת יצרן, דגם ושנתון")
-make_list = sorted(israeli_car_market_full_compilation.keys())
-make_choice = st.selectbox("בחר יצרן:", ["בחר..."] + make_list, index=0)
-make_input  = st.text_input("או הזן שם יצרן ידנית:")
 
-selected_make = make_choice if make_choice != "בחר..." else make_input.strip()
+MAX_WORDS = 3
+MAX_LEN = 30
+ALLOWED_PATTERN = r"^[A-Za-zא-ת0-9\- ]+$"
+
+def validate_input(label, value):
+    if not value:
+        return value
+    if not re.match(ALLOWED_PATTERN, value):
+        st.error(f"❌ {label} כולל תווים לא חוקיים — רק אותיות, ספרות, רווח ומקף מותר")
+        st.stop()
+    words = value.strip().split()
+    if len(words) > MAX_WORDS:
+        st.error(f"❌ {label}: עד {MAX_WORDS} מילים בלבד")
+        st.stop()
+    if len(value.strip()) > MAX_LEN:
+        st.error(f"❌ {label}: עד {MAX_LEN} תווים בלבד")
+        st.stop()
+    return value.strip()
+
+make_list = sorted(israeli_car_market_full_compilation.keys())
+make_choice = st.selectbox("בחר יצרן מהרשימה:", ["בחר..."] + make_list, index=0)
+
+make_input = st.text_input("או הזן שם יצרן ידנית (עד 3 מילים / 30 תווים, מותר מקף):")
+make_input = validate_input("שם יצרן", make_input) if make_input else ""
+
+selected_make = make_choice if make_choice != "בחר..." else make_input
 selected_make = selected_make or ""
 
 selected_model = ""
@@ -257,16 +274,23 @@ year_range = None
 
 if selected_make in israeli_car_market_full_compilation:
     models = israeli_car_market_full_compilation[selected_make]
-    model_choice = st.selectbox(f"דגם של {selected_make}:", ["בחר דגם..."] + models, index=0)
-    model_input  = st.text_input("או הזן דגם ידנית:")
-    selected_model = model_choice if model_choice != "בחר דגם..." else model_input.strip()
+    model_choice = st.selectbox(f"בחר דגם של {selected_make}:", ["בחר דגם..."] + models, index=0)
+
+    model_input = st.text_input("או הזן דגם ידנית (עד 3 מילים / 30 תווים, מותר מקף):")
+    model_input = validate_input("שם דגם", model_input) if model_input else ""
+
+    selected_model = model_choice if model_choice != "בחר דגם..." else model_input
+    selected_model = selected_model or ""
+
     if selected_model:
         yr_start, yr_end = parse_year_range_from_model_label(selected_model)
         if yr_start and yr_end:
             year_range = (yr_start, yr_end)
 else:
     if selected_make:
-        selected_model = st.text_input("שם דגם:")
+        model_input = st.text_input("שם דגם (הקלדה ידנית):")
+        model_input = validate_input("שם דגם", model_input) if model_input else ""
+        selected_model = model_input.strip()
 
 if year_range:
     year = st.number_input(f"שנת ייצור ({year_range[0]}–{year_range[1]}):",
@@ -295,10 +319,11 @@ def render_like_model(base_score, summary, issues_list, detailed_costs_list, sou
     if detailed_costs_list:
         st.markdown("**💰 עלויות תיקון (אינדיקטיבי):**")
         for item in detailed_costs_list:
-            issue = (item.get("issue","") if isinstance(item, dict) else "")
-            cost  = (item.get("avg_cost_ILS", 0) if isinstance(item, dict) else 0)
-            src   = (item.get("source","") if isinstance(item, dict) else "")
-            st.markdown(f"- {issue}: כ-{int(cost)} ₪ (מקור: {src})")
+            if isinstance(item, dict):
+                issue = item.get("issue","")
+                cost  = item.get("avg_cost_ILS", 0)
+                src   = item.get("source","")
+                st.markdown(f"- {issue}: כ-{int(cost)} ₪ (מקור: {src})")
     if source_tag:
         st.caption(source_tag)
 
@@ -331,7 +356,6 @@ if st.button("בדוק אמינות"):
     # ===== Cache first (קשיח): אם יש אפילו אחת ב-≤45 יום → להציג מייד בפורמט זהה למודל =====
     cached_row, _ = get_cached_from_sheet(selected_make, selected_model, int(year), max_days=45)
     if cached_row:
-        is_agg = cached_row.get("is_aggregate", False)
         base_score = cached_row.get("base_score", None)
         avg_cost   = cached_row.get("avg_cost", None)
         issues_raw = cached_row.get("issues", [])
@@ -345,15 +369,12 @@ if st.button("בדוק אמינות"):
             st.warning("🚧 אין סיכום/תקלות מהמאגר עבור הרכב הזה. מומלץ לבצע בדיקה עדכנית.")
             st.stop()
 
-        # תצוגה זהה למודל
         if base_score is not None:
             render_like_model(base_score, summary, issues_list, detailed_costs, source_tag)
-            # הצגת ממוצע עלות אם קיים
             if avg_cost not in [None, "", "nan"]:
                 st.info(f"עלות תחזוקה ממוצעת: כ-{int(float(avg_cost))} ₪")
             st.stop()
         else:
-            # אין base_score שמור – אין פנייה למודל לפי בקשתך
             st.warning("🚧 אין ציון שמור במאגר עבור הרכב הזה. מומלץ לבצע בדיקה עדכנית.")
             st.stop()
 
