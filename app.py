@@ -35,25 +35,25 @@ model = genai.GenerativeModel("gemini-2.5-flash")
 from car_models_dict import israeli_car_market_full_compilation
 
 # ==== Google Sheets via gspread ====
-import gspread
-from google.oauth2.service_account import Credentials
-
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 try:
-    sa_info = json.loads(GOOGLE_CREDENTIALS)
-    creds = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
-    gc = gspread.authorize(creds)
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    st.write("🔄 מנסה להתחבר ל-Google Sheets...")
+
+    credentials = Credentials.from_service_account_info(
+        GOOGLE_SERVICE_ACCOUNT_JSON,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    gc = gspread.authorize(credentials)
     sh = gc.open_by_key(GOOGLE_SHEET_ID)
-    try:
-        ws = sh.worksheet("reliability_results")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="reliability_results", rows=2000, cols=20)
-        ws.append_row([
-            "date","user_id","make","model","year","fuel","transmission",
-            "base_score","avg_cost","issues","search_performed"
-        ])
+    worksheet = sh.sheet1
+
+    st.success("✅ חיבור ל-Google Sheets הצליח!")
+
 except Exception as e:
-    st.error(f"❌ כשל חיבור ל-Google Sheets: {e}")
+    st.error(f"❌ כשל חיבור ל-Google Sheets:")
+    st.code(str(e))
     st.stop()
 
 # ==== Auth (Optional Google Sign-In → Fallback email) ====
