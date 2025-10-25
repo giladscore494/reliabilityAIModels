@@ -1,22 +1,8 @@
+
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 🇮🇱 Car Reliability Analyzer v2.4.0 (Sheets Only + Always-On Debug)
-# ===========================================================
-# מה כלול:
-# - חיבור לגוגל שיטס דרך Service Account (מה-Secrets)
-# - דיבאג חיבור מפורט שמוצג תמיד על המסך (שלבים, כשל, והסבר איך לתקן)
-# - בחירת יצרן/דגם/שנתון עם טווח מהמילון + סוג דלק + תיבת הילוכים
-# - Cache בשיטס ל-45 יום:
-#     * אם יש אפילו תוצאה אחת עדכנית → מחזירים ישר, בלי מודל
-#     * אם יש 3+ תוצאות עדכניות → מציגים ממוצע (יציבות)
-# - מגבלות שימוש:
-#     * גלובלית: 1000 ליום
-#     * למשתמש: מבוטל (anonymous, לפי בחירתך "0")
-# - מודל: gemini-2.5-flash
-# - שדרוגים בגרסה זו:
-#     * הוספת Drive scope כדי לאפשר gc.open_by_key
-#     * דיאגנוסטיקה משופרת ל-PermissionError/403
-#     * וידוא/יצירת כותרות יציב גם כאשר השורה הראשונה ריקה/חלקית
+# 🇮🇱 Car Reliability Analyzer v3.0.1
+# Sheets + Always-On Diagnostics + Smart Cache (45d Hard) + No Auth
 # ===========================================================
 
 import json, re, datetime, difflib, traceback
@@ -25,16 +11,16 @@ import streamlit as st
 from json_repair import repair_json
 import google.generativeai as genai
 
-# ====== עיצוב/הגדרות בסיס ======
+# ---------------- UI ----------------
 st.set_page_config(page_title="🚗 Car Reliability Analyzer (Sheets)", page_icon="🔧", layout="centered")
 st.title("🚗 Car Reliability Analyzer – בדיקת אמינות רכב בישראל (Sheets)")
 
-# ====== טעינת Secrets ======
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
-GOOGLE_SHEET_ID = st.secrets.get("GOOGLE_SHEET_ID")
-GOOGLE_SERVICE_ACCOUNT_JSON = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON")  # JSON כמחרוזת
+# ---------------- Secrets ----------------
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+GOOGLE_SHEET_ID = st.secrets.get("GOOGLE_SHEET_ID", "")
+GOOGLE_SERVICE_ACCOUNT_JSON = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
-# ====== קונפיג מודל ======
+# ---------------- Model ----------------
 if not GEMINI_API_KEY:
     st.error("⚠️ חסר GEMINI_API_KEY ב-Secrets.")
     st.stop()
@@ -42,222 +28,156 @@ if not GEMINI_API_KEY:
 genai.configure(api_key=GEMINI_API_KEY)
 llm = genai.GenerativeModel("gemini-2.5-flash")
 
-# ====== מילון דגמים ======
+# ---------------- Models dictionary ----------------
 from car_models_dict import israeli_car_market_full_compilation
 
-# ====== פונקציות עזר ======
+# ---------------- Helpers ----------------
 def normalize_text(s: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"\(.*?\)", "", str(s))).strip().lower()
+    if s is None:
+        return ""
+    s = re.sub(r"\(.*?\)", " ", str(s))
+    s = re.sub(r"[^0-9A-Za-zא-ת]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
 
-def similar(a: str, b: str) -> float:
+def similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, normalize_text(a), normalize_text(b)).ratio()
 
 def parse_year_range_from_model_label(model_label: str):
-    # תומך גם ב"1962-2012, 2023-2025" – ניקח את הטווח הראשון
-    m = re.search(r"\((\d{4})\s*-\s*(\d{4})", model_label)
-    if m:
-        try:
-            return int(m.group(1)), int(m.group(2))
-        except:
-            return None, None
-    return None, None
+    m = re.search(r"\((\d{4})\s*-\s*(\d{4})", str(model_label))
+    return (int(m.group(1)), int(m.group(2))) if m else (None, None)
 
-# ====== דיבאג חיבור – מוצג תמיד ======
+def build_prompt(make, model, year, fuel_type, transmission):
+    return f"""
+אתה מומחה לאמינות רכבים בישראל עם גישה לחיפוש אינטרנטי.
+חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
+החזר JSON בלבד עם המפתח/ערך הבאים:
+
+{{
+  "search_performed": true או false,
+  "base_score": מספר בין 0 ל-100,
+  "common_issues": [תקלות נפוצות בעברית],
+  "avg_repair_cost_ILS": מספר ממוצע,
+  "issues_with_costs": [
+    {{"issue": "שם התקלה בעברית", "avg_cost_ILS": מספר, "source": "מקור"}}
+  ],
+  "reliability_summary": "סיכום בעברית על רמת האמינות",
+  "sources": ["רשימת אתרים"]
+}}
+
+🧮 משקלות לציון אמינות:
+- מנוע/גיר – 35%
+- חשמל ואלקטרוניקה – 20%
+- מתלים ובלמים – 10%
+- עלות תחזוקה – 15%
+- שביעות רצון – 15%
+- ריקולים – 5%
+
+רכב: {make} {model} {int(year)}
+סוג דלק: {fuel_type}
+תיבת הילוכים: {transmission}
+כתוב בעברית בלבד.
+""".strip()
+
+# ---------------- User ID (ללא הרשמה — always anonymous) ----------------
+user_id = "anonymous"
+
+# ---------------- Connectivity diagnostics to Google Sheets ----------------
 def _ok(step):    return {"step": step, "status": "✅ OK", "hint": ""}
 def _fail(step, why, fix): return {"step": step, "status": f"❌ FAIL - {why}", "hint": fix}
 
 def run_connectivity_diagnostics():
     results = []
 
-    # 1) בדיקת קיום סיקרטים
-    if GEMINI_API_KEY:
-        results.append(_ok("GEMINI_API_KEY נמצא"))
+    if GEMINI_API_KEY: results.append(_ok("GEMINI_API_KEY"))
+    if GOOGLE_SHEET_ID: results.append(_ok("GOOGLE_SHEET_ID"))
+    if GOOGLE_SERVICE_ACCOUNT_JSON: results.append(_ok("GOOGLE_SERVICE_ACCOUNT_JSON"))
     else:
-        results.append(_fail("GEMINI_API_KEY", "חסר", "יש לשים מפתח ב־Secrets בשם GEMINI_API_KEY"))
-    if GOOGLE_SHEET_ID:
-        results.append(_ok("GOOGLE_SHEET_ID נמצא"))
-    else:
-        results.append(_fail(
-            "GOOGLE_SHEET_ID", "חסר",
-            "העתק את ה-ID מה־URL של הגיליון (החלק שבין /d/ ל-/edit) ושמור ב-Secrets."
-        ))
-    if GOOGLE_SERVICE_ACCOUNT_JSON:
-        results.append(_ok("GOOGLE_SERVICE_ACCOUNT_JSON נמצא"))
-    else:
-        results.append(_fail(
-            "GOOGLE_SERVICE_ACCOUNT_JSON", "חסר",
-            "הדבק את קובץ ה־Service Account JSON כולו בין שלושה מרכאות משולשות ב-Secrets."
-        ))
-        return results, None, None, None  # אין טעם להמשיך
+        results.append(_fail("GOOGLE_SERVICE_ACCOUNT_JSON", "missing", "הדבק JSON תקין ב-secrets."))
+        return results, None, None, None
 
-    # 2) JSON של Service Account
     try:
-        service_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        results.append(_ok("פרסינג JSON של Service Account"))
+        svc = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        if "\\n" in svc.get("private_key",""):
+            svc["private_key"] = svc["private_key"].replace("\\n","\n")
+        results.append(_ok("Parsing JSON"))
     except Exception as e:
-        results.append(_fail(
-            "פרסינג JSON של Service Account", "JSON לא תקין",
-            f"ודא שהטקסט ב־Secrets הוא JSON מלא (לא TOML). שגיאה:\n{repr(e)}"
-        ))
+        results.append(_fail("Parsing JSON", "invalid", repr(e)))
         return results, None, None, None
 
-    # תיקון אוטומטי לשבירות מפתח עם \\n
-    try:
-        if "private_key" in service_info and "\\n" in service_info["private_key"]:
-            service_info["private_key"] = service_info["private_key"].replace("\\n", "\n")
-    except Exception:
-        pass
-
-    # 3) מפתחות חובה קיימים
-    required_keys = ["type","project_id","private_key_id","private_key","client_email","client_id","token_uri"]
-    missing = [k for k in required_keys if k not in service_info]
-    if missing:
-        results.append(_fail(
-            "בדיקת שדות חובה ב-JSON", f"חסרים: {', '.join(missing)}",
-            "ייצא מחדש את המפתח ב־GCP (IAM & Admin → Service Accounts → Keys → Add Key → Create new key (JSON))."
-        ))
+    required = ["type","project_id","private_key_id","private_key","client_email","client_id","token_uri"]
+    if not all(k in svc for k in required):
+        results.append(_fail("Required JSON Keys", "missing", "ייצא מחדש מפתח JSON מ-GCP."))
         return results, None, None, None
-    else:
-        results.append(_ok("שדות חובה קיימים ב-JSON"))
+    results.append(_ok("Required JSON Keys"))
 
-    # 4) יצירת Credentials (עם Drive + Sheets)
     try:
         from google.oauth2.service_account import Credentials
+        import gspread
         credentials = Credentials.from_service_account_info(
-            service_info,
+            svc,
             scopes=[
                 "https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive"
-            ]
+            ],
         )
-        results.append(_ok("יצירת Credentials מה־JSON"))
-    except Exception as e:
-        results.append(_fail(
-            "יצירת Credentials", "נכשל",
-            f"בדוק את private_key ושהוא כולל BEGIN/END. שגיאה:\n{repr(e)}"
-        ))
-        return results, None, None, None
-
-    # 5) התחברות gspread
-    try:
-        import gspread
         gc = gspread.authorize(credentials)
-        results.append(_ok("אימות gspread"))
+        results.append(_ok("gspread Auth"))
+    except Exception as e:
+        results.append(_fail("gspread Auth", "fail", repr(e)))
+        return results, None, None, None
+
+    try:
+        sh = gc.open_by_key(GOOGLE_SHEET_ID)
+        results.append(_ok("Open Sheet ID"))
     except Exception as e:
         results.append(_fail(
-            "authorize(gspread)", "נכשל",
-            f"ודא שה־scope נכון ושלא חסומות הרשאות. שגיאה:\n{repr(e)}"
+            "Open Sheet ID", "PermissionError",
+            "🚫 שתף את הגיליון עם ה-client_email + Editor.",
         ))
         return results, None, None, None
 
-    # 6) פתיחת הגיליון לפי ID
-    try:
-        # בדיקה מוקדמת – ID נראה תקין (אופציונלי)
-        if not isinstance(GOOGLE_SHEET_ID, str) or len(GOOGLE_SHEET_ID.strip()) < 30:
-            raise ValueError("Google Sheet ID נראה קצר מדי או ריק.")
-        sh = gc.open_by_key(GOOGLE_SHEET_ID)
-        results.append(_ok(f"פתיחת גיליון לפי ID ({GOOGLE_SHEET_ID})"))
-    except Exception as e:
-        err_txt = repr(e)
-        if ("PERMISSION" in err_txt.upper()) or ("403" in err_txt) or ("insufficientPermissions" in err_txt):
-            results.append(_fail(
-                "פתיחת גיליון לפי ID", "PermissionError",
-                "🚫 הרשאת Drive חסרה או שגויה.\n"
-                "פתרון:\n"
-                "1️⃣ ודא שה-Service Account משותף כ-Editor לגיליון (לא רק Viewer).\n"
-                "2️⃣ ודא שהוספת את ה-scope של Drive בקוד (ראה שלב יצירת Credentials).\n"
-                f"client_email: {service_info.get('client_email','(לא ידוע)')}\n"
-                f"שגיאה: {err_txt}"
-            ))
-        else:
-            results.append(_fail(
-                "פתיחת גיליון לפי ID", "נכשל",
-                "שתף את הגיליון עם כתובת ה־client_email שב־Service Account (Viewer/Editor). "
-                f"client_email: {service_info.get('client_email','(לא ידוע)')}\n"
-                f"שגיאה: {err_txt}"
-            ))
-        return results, None, None, None
-
-    # 7) worksheet ראשון
     try:
         ws = sh.sheet1
-        results.append(_ok("גישה ל־sheet1"))
+        results.append(_ok("Access sheet1"))
     except Exception as e:
-        results.append(_fail(
-            "גישה ל־sheet1", "נכשל",
-            f"ודא שקיים worksheet ראשון. שגיאה:\n{repr(e)}"
-        ))
+        results.append(_fail("Access sheet1", "missing", repr(e)))
         return results, sh, None, None
 
-    # 8) כותרות חובה (וידוא/יצירה יציבה)
     try:
         headers = [
             "date","user_id","make","model","year","fuel","transmission",
             "base_score","avg_cost","issues","search_performed"
         ]
-        # קרא את השורה הראשונה; אם ריקה/חלקית – נשכתב תקין
         current = ws.row_values(1)
-        # הפוך לרשימה באורך הכותרות (מילוי בריקים)
-        current_lower = [c.lower() for c in current] if current else []
-        if current_lower != headers:
-            ws.update("A1", [headers], value_input_option="USER_ENTERED")
-        results.append(_ok("וידוא כותרות בגיליון"))
+        if [c.lower() for c in current] != headers:
+            ws.update("A1",[headers], value_input_option="USER_ENTERED")
+        results.append(_ok("Headers OK"))
     except Exception as e:
-        results.append(_fail(
-            "עדכון כותרות בגיליון", "נכשל",
-            f"בדוק הרשאות עריכה (Editor) לשירות. שגיאה:\n{repr(e)}"
-        ))
-        # עדיין נחזיר את ws להמשך ניסוי
+        results.append(_fail("Headers", "write fail", repr(e)))
         return results, sh, ws, gc
 
     return results, sh, ws, gc
 
-# ====== מריצים דיאגנוסטיקה תמיד ומציגים ======
 diag_results, sh, ws, gc = run_connectivity_diagnostics()
-st.markdown("### 🧪 דיאגנוסטיקה לחיבור Google Sheets (מוצג תמיד)")
+st.markdown("### 🧪 דיאגנוסטיקה")
 for r in diag_results:
     st.markdown(f"- **{r['step']}** → {r['status']}")
-    if r["hint"]:
-        with st.expander("איך לתקן / הסבר", expanded=False):
-            st.write(r["hint"])
-
-# אם אין חיבור שמיש ל־ws – אין טעם להמשיך
 if ws is None:
-    st.error("❌ אין חיבור שמיש ל־Google Sheets. תקן לפי ההנחיות למעלה ורענן.")
     st.stop()
 
-# ====== I/O מול הגיליון ======
+# ---------------- Sheet I/O ----------------
 def sheet_to_df() -> pd.DataFrame:
     try:
         recs = ws.get_all_records()
     except Exception as e:
-        st.error("❌ כשל בקריאת נתונים מהגיליון")
+        st.error("❌ כשל בקריאת נתונים מהשיטס")
         st.code(repr(e))
-        return pd.DataFrame(columns=[
-            "date","user_id","make","model","year","fuel","transmission",
-            "base_score","avg_cost","issues","search_performed"
-        ])
-
-    if not recs:
-        return pd.DataFrame(columns=[
-            "date","user_id","make","model","year","fuel","transmission",
-            "base_score","avg_cost","issues","search_performed"
-        ])
-
-    df = pd.DataFrame(recs)
-    # טיפוסים
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    for c in ["make","model","fuel","transmission","issues","user_id","search_performed"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).fillna("")
-    if "year" in df.columns:
-        df["year"] = pd.to_numeric(df["year"], errors="coerce").fillna(0).astype(int)
-    if "base_score" in df.columns:
-        df["base_score"] = pd.to_numeric(df["base_score"], errors="coerce")
-    if "avg_cost" in df.columns:
-        df["avg_cost"] = pd.to_numeric(df["avg_cost"], errors="coerce")
-    return df
+        return pd.DataFrame()
+    return pd.DataFrame(recs) if recs else pd.DataFrame(columns=[
+        "date","user_id","make","model","year","fuel","transmission",
+        "base_score","avg_cost","issues","search_performed"
+    ])
 
 def append_row_to_sheet(row_dict: dict):
     order = ["date","user_id","make","model","year","fuel","transmission",
@@ -269,41 +189,38 @@ def append_row_to_sheet(row_dict: dict):
         st.error("❌ כשל בכתיבה לשיטס")
         st.code(repr(e))
 
-# ====== מגבלות שימוש ======
+# ---------------- Global Limit Only ----------------
 GLOBAL_DAILY_LIMIT = 1000
-USER_DAILY_LIMIT = 0   # לפי בקשתך: 0 = ללא מגבלת משתמש (כולם anonymous)
 
-def within_daily_global_limit(df: pd.DataFrame, limit=GLOBAL_DAILY_LIMIT):
-    today = pd.Timestamp.now().date()
-    df_today = df[df["date"].dt.date == today] if "date" in df.columns else pd.DataFrame()
-    return (len(df_today) < limit, len(df_today))
+def within_daily_global_limit(df: pd.DataFrame):
+    today = datetime.date.today().isoformat()
+    cnt = len(df[df.get("date","").astype(str) == today]) if not df.empty and "date" in df.columns else 0
+    return (cnt < GLOBAL_DAILY_LIMIT, cnt)
 
-def within_daily_user_limit(df: pd.DataFrame, user_id: str, limit=USER_DAILY_LIMIT):
-    if limit <= 0:
-        return True, 0
-    today = pd.Timestamp.now().date()
-    user_today = df[(df["user_id"].str.lower()==str(user_id).lower()) & (df["date"].dt.date == today)] if "date" in df.columns else pd.DataFrame()
-    return (len(user_today) < limit, len(user_today))
-
-# ====== Cache חכם: אם יש לפחות אחת ב-45 ימים → מחזירים; אם 3+ → ממוצע ======
+# ---------------- Smart Cache (45d Hard) ----------------
 def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     df = sheet_to_df()
     if df.empty:
         return None, df
 
+    try:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+    except Exception:
+        pass
+
     cutoff = pd.Timestamp.now() - pd.Timedelta(days=max_days)
-    recent = df[df["date"] >= cutoff]
+    recent = df[df["date"] >= cutoff] if "date" in df.columns else df
 
-    make_clean = normalize_text(make)
-    model_clean = normalize_text(model)
+    mk = normalize_text(make)
+    md = normalize_text(model)
 
-    # התאמה חזקה תחילה (>=0.95), ואז רכה (>=0.90)
     hits = pd.DataFrame()
-    for th in [0.95, 0.90]:
+    for th in (0.97, 0.93):
         cand = recent[
-            (recent["year"] == int(year)) &
-            (recent["make"].apply(lambda x: similar(x, make_clean) >= th)) &
-            (recent["model"].apply(lambda x: similar(x, model_clean) >= th))
+            (recent["year"].astype("Int64") == int(year)) &
+            (recent["make"].apply(lambda x: similarity(x, mk) >= th)) &
+            (recent["model"].apply(lambda x: similarity(x, md) >= th))
         ]
         if not cand.empty:
             hits = cand.sort_values("date")
@@ -312,51 +229,41 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     if hits.empty:
         return None, df
 
-    # אם יש 3+ תוצאות → נחזיר ממוצע (ליציבות)
     if len(hits) >= 3:
-        avg_score = float(hits["base_score"].dropna().mean()) if "base_score" in hits else None
-        avg_cost  = float(hits["avg_cost"].dropna().mean()) if "avg_cost" in hits else None
-        issues_agg = "; ".join([str(x) for x in hits["issues"].astype(str).tail(3)])  # אחרונות לתצוגה
+        base_score = pd.to_numeric(hits["base_score"], errors="coerce").dropna()
+        avg_cost  = pd.to_numeric(hits["avg_cost"], errors="coerce").dropna()
         return {
             "is_aggregate": True,
-            "count": len(hits),
-            "base_score": round(avg_score) if avg_score is not None else None,
-            "avg_cost": round(avg_cost) if avg_cost is not None else None,
-            "issues": issues_agg,
+            "count": int(len(hits)),
+            "base_score": int(round(base_score.mean())) if not base_score.empty else None,
+            "avg_cost": int(round(avg_cost.mean())) if not avg_cost.empty else None,
+            "issues": "; ".join([str(x) for x in hits["issues"].astype(str).tail(3)]),
             "search_performed": "true (history aggregate)",
-            "last_date": hits.iloc[-1]["date"]
+            "last_date": str(hits.iloc[-1]["date"].date()) if not hits.empty else None
         }, df
 
-    # אחרת נחזיר את העדכנית ביותר
     row = hits.iloc[-1].to_dict()
     row["is_aggregate"] = False
-    row["count"] = len(hits)
+    row["count"] = int(len(hits))
     return row, df
 
-# ====== UI בחירה ======
+# ---------------- UI Selection ----------------
 st.markdown("### 🔍 בחירת יצרן, דגם ושנתון")
 make_list = sorted(israeli_car_market_full_compilation.keys())
-make_choice = st.selectbox("בחר יצרן מהרשימה:", ["בחר..."] + make_list, index=0)
+make_choice = st.selectbox("בחר יצרן:", ["בחר..."] + make_list, index=0)
 make_input  = st.text_input("או הזן שם יצרן ידנית:")
 
-if make_choice != "בחר...":
-    selected_make = make_choice
-elif make_input.strip():
-    selected_make = make_input.strip()
-else:
-    selected_make = ""
+selected_make = make_choice if make_choice != "בחר..." else make_input.strip()
+selected_make = selected_make or ""
 
 selected_model = ""
 year_range = None
 
 if selected_make in israeli_car_market_full_compilation:
     models = israeli_car_market_full_compilation[selected_make]
-    model_choice = st.selectbox(f"בחר דגם של {selected_make}:", ["בחר דגם..."] + models, index=0)
+    model_choice = st.selectbox(f"דגם של {selected_make}:", ["בחר דגם..."] + models, index=0)
     model_input  = st.text_input("או הזן דגם ידנית:")
-    if model_choice != "בחר דגם...":
-        selected_model = model_choice
-    elif model_input.strip():
-        selected_model = model_input.strip()
+    selected_model = model_choice if model_choice != "בחר דגם..." else model_input.strip()
 
     if selected_model:
         yr_start, yr_end = parse_year_range_from_model_label(selected_model)
@@ -364,19 +271,14 @@ if selected_make in israeli_car_market_full_compilation:
             year_range = (yr_start, yr_end)
 else:
     if selected_make:
-        st.warning("️📋 יצרן לא במילון – הזן דגם ידנית:")
-    selected_model = st.text_input("שם דגם:")
+        selected_model = st.text_input("שם דגם:")
 
-# שנתון
 if year_range:
-    year = st.number_input(
-        f"שנת ייצור (טווח לפי המילון: {year_range[0]}–{year_range[1]}):",
-        min_value=year_range[0], max_value=year_range[1], step=1
-    )
+    year = st.number_input(f"שנת ייצור ({year_range[0]}–{year_range[1]}):",
+                           min_value=year_range[0], max_value=year_range[1], step=1)
 else:
     year = st.number_input("שנת ייצור:", min_value=1960, max_value=2025, step=1)
 
-# דלק/תיבה
 col1, col2 = st.columns(2)
 with col1:
     fuel_type = st.selectbox("סוג דלק:", ["בנזין", "דיזל", "היברידי", "חשמלי", "אחר"])
@@ -385,126 +287,90 @@ with col2:
 
 st.markdown("---")
 
-# ====== הפעלה ======
+# ---------------- Run Button ----------------
 if st.button("בדוק אמינות"):
-    # זיהוי משתמש: לפי בחירתך – כולם anonymous
-    current_user = "anonymous"
-
     if not selected_make or not selected_model:
         st.error("יש להזין שם יצרן ודגם תקינים.")
         st.stop()
 
-    # מגבלות יומיות
     df_all = sheet_to_df()
-    ok_global, total_global = within_daily_global_limit(df_all, limit=GLOBAL_DAILY_LIMIT)
-    ok_user, total_user     = within_daily_user_limit(df_all, user_id=current_user, limit=USER_DAILY_LIMIT)
-
+    ok_global, total_global = within_daily_global_limit(df_all)
     if not ok_global:
-        st.error(f"❌ חציתם את מגבלת {GLOBAL_DAILY_LIMIT} הבדיקות היומיות לכלל המערכת (כבר בוצעו {total_global}). נסו מחר.")
-        st.stop()
-    if not ok_user:
-        st.error(f"❌ הגעת למכסת היומית למשתמש ({total_user}/{USER_DAILY_LIMIT}). נסה מחר.")
+        st.error(f"❌ חציתם את מגבלת {GLOBAL_DAILY_LIMIT} הבדיקות היומיות (בוצעו {total_global}). נסו מחר.")
         st.stop()
 
-    st.info(f"ניצול יומי – מערכת: {total_global}/{GLOBAL_DAILY_LIMIT} | למשתמש: {'ללא מגבלה'}")
+    # ✅ Cache first — ללא Gemini אם יש אפילו אחת אחרונה ≤45 יום
+    st.info(f"בודק Cache בשיטס עבור {selected_make} {selected_model} ({int(year)})...")
+    cached_row, _ = get_cached_from_sheet(selected_make, selected_model, int(year), max_days=45)
 
-    st.info(f"בודק Cache בשיטס עבור {selected_make} {selected_model} ({year})...")
-    cached_row, df_all_after = get_cached_from_sheet(selected_make, selected_model, int(year), max_days=45)
-
-    # אם קיימת אפילו תוצאה אחת עדכנית → מציגים מייד
     if cached_row:
         if cached_row.get("is_aggregate"):
-            st.success(f"✅ נמצאו {cached_row['count']} תוצאות עדכניות (≤45 יום). מוצג ממוצע יציב. אין פנייה ל־Gemini.")
+            st.success(f"✅ {cached_row['count']} תוצאות עדכניות (≤45 יום). מציג ממוצע יציב — ללא Gemini.")
             if cached_row.get("base_score") is not None:
-                st.subheader(f"ציון אמינות כולל (ממוצע): {int(cached_row['base_score'])}/100")
+                st.subheader(f"ציון אמינות כולל: {int(cached_row['base_score'])}/100")
             if cached_row.get("avg_cost") is not None:
-                st.info(f"עלות תחזוקה ממוצעת (ממוצע): כ־{int(float(cached_row['avg_cost']))} ₪")
-            st.write(f"תקלות נפוצות (שלוש האחרונות): {cached_row.get('issues','—')}")
-            st.write(f"נמצא באמצעות חיפוש אינטרנטי: {cached_row.get('search_performed','false')}")
+                st.info(f"עלות תחזוקה ממוצעת: כ-{int(float(cached_row['avg_cost']))} ₪")
+            st.write(f"תקלות נפוצות: {cached_row.get('issues','—')}")
             st.stop()
         else:
-            st.success("✅ נמצאה תוצאה שמורה מ־45 הימים האחרונים. ללא פנייה ל־Gemini.")
+            st.success("✅ נמצאה תוצאה עדכנית ≤45 יום — ללא Gemini.")
             st.subheader(f"ציון אמינות כולל: {int(cached_row.get('base_score',0))}/100")
             if cached_row.get("avg_cost") not in [None, "", "nan"]:
-                st.info(f"עלות תחזוקה ממוצעת: כ־{int(float(cached_row.get('avg_cost',0)))} ₪")
+                st.info(f"עלות תחזוקה ממוצעת: כ-{int(float(cached_row.get('avg_cost',0)))} ₪")
             st.write(f"תקלות נפוצות: {cached_row.get('issues','—')}")
-            st.write(f"נמצא באמצעות חיפוש אינטרנטי: {cached_row.get('search_performed','false')}")
             st.stop()
 
-    # אין Cache → פונים למודל
-    prompt = f"""
-    אתה מומחה לאמינות רכבים בישראל עם גישה לחיפוש אינטרנטי.
-    חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
-    החזר JSON בלבד עם הנתונים הבאים:
-    **You must perform an internet search for information sources for the parameters I requested.**
-    **You must perform an internet search for repair prices in Israel and Hebrew sources. You can also search for information about faults from international sources, but repair prices are only from Israel.**
-
-    {{
-        "search_performed": true או false,
-        "base_score": מספר בין 0 ל-100,
-        "common_issues": [תקלות נפוצות בעברית],
-        "avg_repair_cost_ILS": מספר ממוצע,
-        "issues_with_costs": [
-            {{"issue": "שם התקלה בעברית", "avg_cost_ILS": מספר, "source": "מקור"}}
-        ],
-        "reliability_summary": "סיכום בעברית על רמת האמינות",
-        "sources": ["רשימת אתרים"]
-    }}
-
-    🧮 משקלות לציון אמינות:
-    - מנוע/גיר – 35%
-    - חשמל ואלקטרוניקה – 20%
-    - מתלים ובלמים – 10%
-    - עלות תחזוקה – 15%
-    - שביעות רצון – 15%
-    - ריקולים – 5%
-
-    רכב: {selected_make} {selected_model} {int(year)}
-    סוג דלק: {fuel_type}
-    תיבת הילוכים: {transmission}
-    כתוב בעברית בלבד.
-    """.strip()
+    # ---------------- No Cache → Gemini ----------------
+    prompt = build_prompt(selected_make, selected_model, int(year), fuel_type, transmission)
 
     try:
-        with st.spinner("מבצע חיפוש אינטרנטי ומחשב ציון..."):
+        with st.spinner("🌐 מבצע חיפוש אינטרנטי ומחשב ציון..."):
             resp = llm.generate_content(prompt)
             raw = (getattr(resp, "text", "") or "").strip()
             m = re.search(r"\{.*\}", raw, re.DOTALL)
-            if m:
-                parsed = json.loads(m.group())
-            else:
-                # ניסיון תיקון JSON "כמעט תקין"
-                fixed = repair_json(raw)
-                parsed = json.loads(fixed)
+            parsed = json.loads(m.group()) if m else json.loads(repair_json(raw))
+    except Exception as e:
+        st.error("שגיאה בעיבוד תשובת המודל:")
+        st.code(repr(e))
+        st.code(traceback.format_exc())
+        st.stop()
 
-        base_score = int(parsed.get("base_score", 0) or 0)
-        issues = parsed.get("common_issues", [])
-        avg_cost = parsed.get("avg_repair_cost_ILS", 0)
-        search_flag = parsed.get("search_performed", False)
-        summary = parsed.get("reliability_summary", "אין מידע.")
-        detailed_costs = parsed.get("issues_with_costs", [])
+    base_score = int(parsed.get("base_score", 0) or 0)
+    issues = parsed.get("common_issues", [])
+    avg_cost = parsed.get("avg_repair_cost_ILS", 0)
+    summary = parsed.get("reliability_summary", "אין מידע.")
 
-        if search_flag:
-            st.success("🌐 בוצע חיפוש אינטרנטי בזמן אמת.")
-        else:
-            st.warning("⚠️ לא בוצע חיפוש אינטרנטי — ייתכן שהמידע חלקי.")
+    if parsed.get("search_performed", False):
+        st.success("🌐 בוצע חיפוש אינטרנטי בזמן אמת.")
+    else:
+        st.warning("⚠️ לא בוצע חיפוש אינטרנטי — ייתכן שהמידע חלקי.")
 
-        st.subheader(f"ציון אמינות כולל: {base_score}/100")
-        st.write(summary)
+    st.subheader(f"ציון אמינות כולל: {base_score}/100")
+    st.write(summary)
 
-        if issues:
-            st.markdown("**🔧 תקלות נפוצות:**")
-            for i in issues:
-                st.markdown(f"- {i}")
+    if issues:
+        st.markdown("**🔧 תקלות נפוצות:**")
+        for i in issues:
+            st.markdown(f"- {i}")
 
-        if detailed_costs:
-            st.markdown("**💰 עלויות תיקון (אינדיקטיבי):**")
-            for item in detailed_costs:
-                st.markdown(f"- {item.get('issue','')}: כ־{item.get('avg_cost_ILS', 0)} ₪ (מקור: {item.get('source','')})")
+    detailed_costs = parsed.get("issues_with_costs", [])
+    if detailed_costs:
+        st.markdown("**💰 עלויות תיקון:**")
+        for item in detailed_costs:
+            st.markdown(f"- {item.get('issue','')}: כ-{item.get('avg_cost_ILS', 0)} ₪ (מקור: {item.get('source','')})")
 
-        # שמירה לשיטס (תמיד normalize לשמות)
-        append_row_to_sheet({
-            "date": datetime.date.today().isoformat(),
-            "user_id": "anonymous",
-            "make": normalize_text(selected_make),
-            "mode
+    # ✅ Save new search
+    append_row_to_sheet({
+        "date": datetime.date.today().isoformat(),
+        "user_id": user_id,
+        "make": normalize_text(selected_make),
+        "model": normalize_text(selected_model),
+        "year": int(year),
+        "fuel": fuel_type,
+        "transmission": transmission,
+        "base_score": base_score,
+        "avg_cost": avg_cost,
+        "issues": "; ".join(issues) if isinstance(issues, list) else str(issues),
+        "search_performed": "true"
+    })
+    st.info("💾 נשמר לשיטס בהצלחה.")
