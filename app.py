@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
-# Car Reliability Analyzer – Israel (v3.1.3)
-# Sheets + Smart 45d Cache + No Auth + Manual Input Limits (3 words & 30 chars)
-# Cached results render EXACTLY like live model responses (Gemini)
+# Car Reliability Analyzer – Israel (v3.2.0)
+# Sheets + 45d Cache + No Auth + 30-char limit + Sub-Model with A+B fallback
 
 import json, re, datetime, difflib, traceback
 import pandas as pd
@@ -9,30 +8,28 @@ import streamlit as st
 from json_repair import repair_json
 import google.generativeai as genai
 
-# ---------- UI ----------
+# ---------------- UI ----------------
 st.set_page_config(page_title="🚗 Car Reliability Analyzer (Sheets)", page_icon="🔧", layout="centered")
 st.title("🚗 Car Reliability Analyzer – בדיקת אמינות רכב בישראל (Sheets)")
 
-# ---------- Secrets ----------
+# ---------------- Secrets ----------------
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 GOOGLE_SHEET_ID = st.secrets.get("GOOGLE_SHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
-# ---------- Model ----------
+# ---------------- Model ----------------
 if not GEMINI_API_KEY:
     st.error("⚠️ חסר GEMINI_API_KEY ב-Secrets.")
     st.stop()
 genai.configure(api_key=GEMINI_API_KEY)
 llm = genai.GenerativeModel("gemini-2.5-flash")
 
-# ---------- Models dictionary ----------
+# ---------------- Models dictionary ----------------
 from car_models_dict import israeli_car_market_full_compilation
 
-# ---------- Helpers ----------
+# ---------------- Helpers ----------------
 ALLOWED_PATTERN = r"^[A-Za-zא-ת0-9\- ]+$"
-MAX_WORDS = 3
 MAX_LEN = 30
-ERR_MSG = "הזנה ארוכה מדי — ניתן להזין עד 3 מילים או 30 תווים"
 
 def normalize_text(s: str) -> str:
     if s is None:
@@ -49,7 +46,8 @@ def parse_year_range_from_model_label(model_label: str):
     m = re.search(r"\((\d{4})\s*-\s*(\d{4})", str(model_label))
     return (int(m.group(1)), int(m.group(2))) if m else (None, None)
 
-def build_prompt(make, model, year, fuel_type, transmission):
+def build_prompt(make, model, sub_model, year, fuel_type, transmission):
+    extra = f" תת-דגם/תצורה: {sub_model}" if sub_model else ""
     return f"""
 אתה מומחה לאמינות רכבים בישראל עם גישה לחיפוש אינטרנטי.
 חובה לבצע חיפוש עדכני בעברית ובאנגלית ממקורות אמינים בלבד.
@@ -75,7 +73,7 @@ def build_prompt(make, model, year, fuel_type, transmission):
 - שביעות רצון – 15%
 - ריקולים – 5%
 
-רכב: {make} {model} {int(year)}
+רכב: {make} {model}{extra} {int(year)}
 סוג דלק: {fuel_type}
 תיבת הילוכים: {transmission}
 כתוב בעברית בלבד.
@@ -98,19 +96,18 @@ def safe_json_parse(value):
         except Exception:
             return None
 
-def validate_input_or_stop(value: str):
+def validate_text(value: str, label: str) -> str:
     if not value:
         return ""
+    if len(value) > MAX_LEN:
+        st.error("הזנה ארוכה מדי — עד 30 תווים")
+        st.stop()
     if not re.match(ALLOWED_PATTERN, value):
-        st.error(ERR_MSG); st.stop()
-    words = value.strip().split()
-    if len(words) > MAX_WORDS:
-        st.error(ERR_MSG); st.stop()
-    if len(value.strip()) > MAX_LEN:
-        st.error(ERR_MSG); st.stop()
+        st.error("הזנה לא חוקית — מותר רק אותיות/ספרות/רווח/מקף")
+        st.stop()
     return value.strip()
 
-# ---------- Sheets connectivity (no debug UI) ----------
+# ---------------- Sheets connectivity ----------------
 def connect_sheet():
     if not (GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON):
         st.error("❌ אין חיבור למאגר — חסרים Secrets.")
@@ -132,7 +129,7 @@ def connect_sheet():
         sh = gc.open_by_key(GOOGLE_SHEET_ID)
         ws = sh.sheet1
         headers = [
-            "date","user_id","make","model","year","fuel","transmission",
+            "date","user_id","make","model","sub_model","year","fuel","transmission",
             "base_score","avg_cost","issues","search_performed",
             "reliability_summary","issues_with_costs","sources"
         ]
@@ -146,7 +143,7 @@ def connect_sheet():
 
 ws = connect_sheet()
 
-# ---------- Sheet I/O ----------
+# ---------------- Sheet I/O ----------------
 def sheet_to_df() -> pd.DataFrame:
     try:
         recs = ws.get_all_records()
@@ -154,18 +151,18 @@ def sheet_to_df() -> pd.DataFrame:
         st.error("❌ כשל בקריאת נתונים מהמאגר (Google Sheets)")
         st.code(repr(e))
         return pd.DataFrame(columns=[
-            "date","user_id","make","model","year","fuel","transmission",
+            "date","user_id","make","model","sub_model","year","fuel","transmission",
             "base_score","avg_cost","issues","search_performed",
             "reliability_summary","issues_with_costs","sources"
         ])
     return pd.DataFrame(recs) if recs else pd.DataFrame(columns=[
-        "date","user_id","make","model","year","fuel","transmission",
+        "date","user_id","make","model","sub_model","year","fuel","transmission",
         "base_score","avg_cost","issues","search_performed",
         "reliability_summary","issues_with_costs","sources"
     ])
 
 def append_row_to_sheet(row_dict: dict):
-    order = ["date","user_id","make","model","year","fuel","transmission",
+    order = ["date","user_id","make","model","sub_model","year","fuel","transmission",
              "base_score","avg_cost","issues","search_performed",
              "reliability_summary","issues_with_costs","sources"]
     row = [row_dict.get(k,"") for k in order]
@@ -175,7 +172,7 @@ def append_row_to_sheet(row_dict: dict):
         st.error("❌ כשל בכתיבה למאגר")
         st.code(repr(e))
 
-# ---------- Limits ----------
+# ---------------- Limits ----------------
 GLOBAL_DAILY_LIMIT = 1000
 
 def within_daily_global_limit(df: pd.DataFrame, limit=GLOBAL_DAILY_LIMIT):
@@ -183,11 +180,28 @@ def within_daily_global_limit(df: pd.DataFrame, limit=GLOBAL_DAILY_LIMIT):
     cnt = len(df[df.get("date","").astype(str) == today]) if not df.empty and "date" in df.columns else 0
     return (cnt < limit, cnt)
 
-# ---------- Smart Cache (45d, Hardened) ----------
-def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
+# ---------------- Smart Cache (45d) with sub-model A+B fallback ----------------
+def match_hits(recent: pd.DataFrame, year: int, make: str, model: str, sub_model: str|None, th: float):
+    mk, md, sm = normalize_text(make), normalize_text(model), normalize_text(sub_model or "")
+    use_sub = len(sm) > 0
+    cand = recent[
+        (recent["year"].astype("Int64") == int(year)) &
+        (recent["make"].apply(lambda x: similarity(x, mk) >= th)) &
+        (recent["model"].apply(lambda x: similarity(x, md) >= th))
+    ]
+    if use_sub and "sub_model" in recent.columns:
+        cand = cand[cand["sub_model"].apply(lambda x: similarity(x, sm) >= th)]
+    return cand.sort_values("date")
+
+def get_cached_from_sheet(make: str, model: str, sub_model: str, year: int, max_days=45):
+    """
+    אם קיימת אפילו תוצאה אחת ב-≤45 יום → נחזיר מייד (ללא Gemini).
+    אם סינון לפי תת-דגם לא מחזיר תוצאות → fallback אוטומטי לדגם בלבד (נודיע).
+    אם 3+ תוצאות → נחזיר ממוצע לבסיס/עלות ותצוגת issues אחרונות.
+    """
     df = sheet_to_df()
     if df.empty:
-        return None, df
+        return None, df, False  # no_cache, df, used_fallback=False
 
     try:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -198,42 +212,42 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     cutoff = pd.Timestamp.now() - pd.Timedelta(days=max_days)
     recent = df[df["date"] >= cutoff] if "date" in df.columns else df
 
-    mk = normalize_text(make)
-    md = normalize_text(model)
-
+    # שלב א: ננסה עם sub_model (אם קיים)
     hits = pd.DataFrame()
+    used_fallback = False
     for th in (0.97, 0.93):
-        cand = recent[
-            (recent["year"].astype("Int64") == int(year)) &
-            (recent["make"].apply(lambda x: similarity(x, mk) >= th)) &
-            (recent["model"].apply(lambda x: similarity(x, md) >= th))
-        ]
-        if not cand.empty:
-            hits = cand.sort_values("date")
+        hits = match_hits(recent, year, make, model, sub_model, th)
+        if not hits.empty:
             break
 
+    # שלב ב: fallback לדגם בלבד אם אין התאמה לתת-דגם
+    if hits.empty and sub_model:
+        used_fallback = True
+        for th in (0.97, 0.93):
+            hits = match_hits(recent, year, make, model, None, th)
+            if not hits.empty:
+                break
+
     if hits.empty:
-        return None, df
+        return None, df, used_fallback
 
     if len(hits) >= 3:
         base_score_series = pd.to_numeric(hits["base_score"], errors="coerce").dropna()
         avg_cost_series  = pd.to_numeric(hits["avg_cost"], errors="coerce").dropna()
         issues_tail = "; ".join([str(x) for x in hits["issues"].astype(str).tail(3)])
         last_row = hits.iloc[-1].to_dict()
-        issues_with_costs = safe_json_parse(last_row.get("issues_with_costs"))
-        reliability_summary = last_row.get("reliability_summary") or ""
         return {
             "is_aggregate": True,
             "count": int(len(hits)),
             "base_score": int(round(base_score_series.mean())) if not base_score_series.empty else None,
             "avg_cost": int(round(avg_cost_series.mean())) if not avg_cost_series.empty else None,
             "issues": issues_tail,
-            "issues_with_costs": issues_with_costs if isinstance(issues_with_costs, list) else [],
-            "reliability_summary": reliability_summary,
+            "issues_with_costs": safe_json_parse(last_row.get("issues_with_costs")) or [],
+            "reliability_summary": last_row.get("reliability_summary") or "",
             "search_performed": "true (history aggregate)",
-            "last_date": str(hits.iloc[-1]["date"].date()) if not hits.empty else None,
+            "last_date": str(hits.iloc[-1]["date"].date()),
             "sources": last_row.get("sources","")
-        }, df
+        }, df, used_fallback
 
     row = hits.iloc[-1].to_dict()
     row["is_aggregate"] = False
@@ -241,19 +255,16 @@ def get_cached_from_sheet(make: str, model: str, year: int, max_days=45):
     row["issues_with_costs"] = safe_json_parse(row.get("issues_with_costs")) or []
     row["reliability_summary"] = row.get("reliability_summary") or ""
     row["last_date"] = str(hits.iloc[-1]["date"].date())
-    return row, df
+    return row, df, used_fallback
 
-# ---------- UI Selection (STRICT: 3 words & 30 chars; live + submit) ----------
+# ---------------- UI Selection ----------------
 st.markdown("### 🔍 בחירת יצרן, דגם ושנתון")
 
 make_list = sorted(israeli_car_market_full_compilation.keys())
 make_choice = st.selectbox("בחר יצרן מהרשימה:", ["בחר..."] + make_list, index=0)
 
-make_input = st.text_input(
-    "או הזן שם יצרן ידנית (עד 3 מילים / 30 תווים, מותר מקף):",
-    max_chars=MAX_LEN
-)
-make_input = validate_input_or_stop(make_input) if make_input else ""
+make_input = st.text_input("או הזן שם יצרן ידנית (עד 30 תווים, מותר מקף):", max_chars=MAX_LEN)
+make_input = validate_text(make_input, "שם יצרן") if make_input else ""
 selected_make = make_choice if make_choice != "בחר..." else make_input
 selected_make = selected_make or ""
 
@@ -263,12 +274,8 @@ year_range = None
 if selected_make in israeli_car_market_full_compilation:
     models = israeli_car_market_full_compilation[selected_make]
     model_choice = st.selectbox(f"בחר דגם של {selected_make}:", ["בחר דגם..."] + models, index=0)
-
-    model_input = st.text_input(
-        "או הזן דגם ידנית (עד 3 מילים / 30 תווים, מותר מקף):",
-        max_chars=MAX_LEN
-    )
-    model_input = validate_input_or_stop(model_input) if model_input else ""
+    model_input = st.text_input("או הזן דגם ידנית (עד 30 תווים, מותר מקף):", max_chars=MAX_LEN)
+    model_input = validate_text(model_input, "שם דגם") if model_input else ""
     selected_model = model_choice if model_choice != "בחר דגם..." else model_input
     selected_model = selected_model or ""
 
@@ -278,12 +285,13 @@ if selected_make in israeli_car_market_full_compilation:
             year_range = (yr_start, yr_end)
 else:
     if selected_make:
-        model_input = st.text_input(
-            "שם דגם (הקלדה ידנית — עד 3 מילים / 30 תווים, מותר מקף):",
-            max_chars=MAX_LEN
-        )
-        model_input = validate_input_or_stop(model_input) if model_input else ""
+        model_input = st.text_input("שם דגם (הקלדה ידנית — עד 30 תווים, מותר מקף):", max_chars=MAX_LEN)
+        model_input = validate_text(model_input, "שם דגם") if model_input else ""
         selected_model = model_input.strip()
+
+# תת-דגם / תצורה (אופציונלי)
+sub_model = st.text_input("תת-דגם / תצורה (לא חובה, עד 30 תווים):", max_chars=MAX_LEN, placeholder="לדוגמה: סדאן / האצ'בק / Hybrid / Premium")
+sub_model = validate_text(sub_model, "תת-דגם") if sub_model else ""
 
 if year_range:
     year = st.number_input(f"שנת ייצור ({year_range[0]}–{year_range[1]}):",
@@ -299,7 +307,7 @@ with col2:
 
 st.markdown("---")
 
-# ---------- Render helpers ----------
+# ---------------- Render helpers ----------------
 def render_like_model(base_score, summary, issues_list, detailed_costs_list, source_tag):
     st.subheader(f"ציון אמינות כולל: {int(base_score)}/100")
     if summary:
@@ -331,27 +339,27 @@ def explode_issues(issues_field):
         return [x.strip() for x in s.split(",") if x.strip()]
     return [s] if s.strip() else []
 
-# ---------- Run ----------
+# ---------------- Run ----------------
 if st.button("בדוק אמינות"):
     if not selected_make or not selected_model:
         st.error("יש להזין שם יצרן ודגם תקינים.")
         st.stop()
 
-    # ולידציה סופית גם אחרי הלחיצה
-    for value in [selected_make, selected_model]:
+    # ולידציה סופית (עד 30 תווים + תווים מותרים)
+    for value in [selected_make, selected_model, sub_model]:
         if value:
-            if not re.match(ALLOWED_PATTERN, value): st.error(ERR_MSG); st.stop()
-            if len(value.strip().split()) > MAX_WORDS: st.error(ERR_MSG); st.stop()
-            if len(value.strip()) > MAX_LEN: st.error(ERR_MSG); st.stop()
+            if len(value) > MAX_LEN: st.error("הזנה ארוכה מדי — עד 30 תווים"); st.stop()
+            if not re.match(ALLOWED_PATTERN, value): st.error("הזנה לא חוקית — מותר רק אותיות/ספרות/רווח/מקף"); st.stop()
 
+    # מגבלת מערכת יומית
     df_all = sheet_to_df()
     ok_global, total_global = within_daily_global_limit(df_all, limit=GLOBAL_DAILY_LIMIT)
     if not ok_global:
         st.error(f"❌ חציתם את מגבלת {GLOBAL_DAILY_LIMIT} הבדיקות היומיות (בוצעו {total_global}). נסו מחר.")
         st.stop()
 
-    # ===== Cache first =====
-    cached_row, _ = get_cached_from_sheet(selected_make, selected_model, int(year), max_days=45)
+    # ===== Cache first (עם A+B fallback) =====
+    cached_row, _, used_fallback = get_cached_from_sheet(selected_make, selected_model, sub_model, int(year), max_days=45)
     if cached_row:
         base_score = cached_row.get("base_score", None)
         avg_cost   = cached_row.get("avg_cost", None)
@@ -360,14 +368,15 @@ if st.button("בדוק אמינות"):
         detailed_costs = cached_row.get("issues_with_costs", []) or []
         summary = cached_row.get("reliability_summary", "") or ""
         last_date = cached_row.get("last_date", "")
-        source_tag = f"✅ מקור: נתון קיים מהמאגר (נבדק: {last_date}). לא בוצעה פנייה למודל."
-
+        tag = "✅ מקור: נתון קיים מהמאגר"
+        if used_fallback and sub_model:
+            tag += " (נמצאה התאמה לפי דגם בלבד; תת-דגם לא זוהה)"
+        tag += f" (נבדק: {last_date}). לא בוצעה פנייה למודל."
         if base_score is None and not issues_list and not detailed_costs and not summary:
             st.warning("🚧 אין סיכום/תקלות מהמאגר עבור הרכב הזה. מומלץ לבצע בדיקה עדכנית.")
             st.stop()
-
         if base_score is not None:
-            render_like_model(base_score, summary, issues_list, detailed_costs, source_tag)
+            render_like_model(base_score, summary, issues_list, detailed_costs, tag)
             if avg_cost not in [None, "", "nan"]:
                 st.info(f"עלות תחזוקה ממוצעת: כ-{int(float(avg_cost))} ₪")
             st.stop()
@@ -376,7 +385,7 @@ if st.button("בדוק אמינות"):
             st.stop()
 
     # ===== No cache → call Gemini =====
-    prompt = build_prompt(selected_make, selected_model, int(year), fuel_type, transmission)
+    prompt = build_prompt(selected_make, selected_model, sub_model, int(year), fuel_type, transmission)
     try:
         with st.spinner("🌐 מבצע חיפוש אינטרנטי ומחשב ציון..."):
             resp = llm.generate_content(prompt)
@@ -420,6 +429,7 @@ if st.button("בדוק אמינות"):
         "user_id": "anonymous",
         "make": normalize_text(selected_make),
         "model": normalize_text(selected_model),
+        "sub_model": normalize_text(sub_model),
         "year": int(year),
         "fuel": fuel_type,
         "transmission": transmission,
