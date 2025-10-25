@@ -1,5 +1,6 @@
 streamlit
 pandas
-PyGithub
 google-generativeai
 json-repair
+gspread
+google-auth
