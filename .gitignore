@@ -1,0 +1,10 @@
+.venv/
+node_modules/
+dist/
+client/dist/
+server/.venv/
+.env
+.env.*
+*.pyc
+__pycache__/
+.vscode/
