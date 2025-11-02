@@ -62,7 +62,7 @@ A comprehensive car reliability analysis platform for the Israeli market, featur
 │  ├─ requirements.txt
 │  └─ gunicorn_conf.py
 │
-├─ render.yaml                     # Render deployment config
+├─ railway.json                    # Railway deployment config
 ├─ env.example                     # Environment variables template
 ├─ .gitignore
 └─ README.md
@@ -174,44 +174,31 @@ Check remaining quota for user and global
 #### `GET /health`
 Health check
 
-## 🚢 Deployment to Render
+## 🚢 Deployment to Railway
 
-### Option 1: Using render.yaml (Recommended)
+### Using railway.json (Recommended)
 
 1. Push code to GitHub
-2. In Render Dashboard:
-   - New → Blueprint
+2. In Railway Dashboard:
+   - New Project → Deploy from GitHub repo
    - Connect your repository
-   - Render will auto-detect `render.yaml`
-3. Set environment variables in Render dashboard for both services
+   - Railway will auto-detect `railway.json`
+3. Set environment variables in Railway dashboard for both services
 4. Deploy!
 
-### Option 2: Manual Setup
-
-#### Server (Web Service)
-- **Build Command**: `cd server && pip install -r requirements.txt`
-- **Start Command**: `cd server && uvicorn app:app --host 0.0.0.0 --port $PORT`
-- **Environment**: Python 3
-
-#### Client (Static Site)
-- **Build Command**: `cd client && npm install && npm run build`
-- **Publish Directory**: `client/dist`
-
-### Environment Variables (Set in Render Dashboard)
+### Environment Variables (Set in Railway Dashboard)
 
 **Server Service:**
-- `ALLOWED_ORIGINS`: Your client URL
+- `ALLOWED_ORIGINS`: Your client URL (or "*" for all origins)
 - `GOOGLE_SHEET_ID`: Your sheet ID
 - `GOOGLE_SERVICE_ACCOUNT_JSON`: Service account JSON (one line)
 - `GEMINI_API_KEY`: Your Gemini API key
 - `GOOGLE_OAUTH_CLIENT_ID`: OAuth client ID
 - `GOOGLE_OAUTH_AUDIENCE`: Same as client ID
-- `GLOBAL_DAILY_LIMIT`: 1000
-- `USER_DAILY_LIMIT`: 5
-- `CACHE_MAX_DAYS`: 45
+- `PORT`: 8000 (Railway sets this automatically)
 
 **Client Service:**
-- `VITE_API_BASE_URL`: Your server URL (e.g., https://car-dashboard-server.onrender.com)
+- `VITE_API_BASE_URL`: Your server URL (e.g., https://car-dashboard-server-production.up.railway.app)
 - `VITE_GOOGLE_CLIENT_ID`: OAuth client ID
 
 ## 🧪 Testing
@@ -219,10 +206,10 @@ Health check
 ### Test Server
 ```bash
 # Health check
-curl https://your-server.onrender.com/health
+curl https://your-server.up.railway.app/health
 
 # Test analysis (anonymous)
-curl -X POST https://your-server.onrender.com/v1/analyze \
+curl -X POST https://your-server.up.railway.app/v1/analyze \
   -H "Content-Type: application/json" \
   -d '{
     "make": "Mazda",
@@ -285,4 +272,4 @@ Open the deployed client URL and:
 - [Google Gemini API](https://ai.google.dev/)
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
 - [React Documentation](https://react.dev/)
-- [Render Documentation](https://render.com/docs)
+- [Railway Documentation](https://docs.railway.app/)

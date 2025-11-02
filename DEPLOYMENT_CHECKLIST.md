@@ -1,5 +1,5 @@
 # 🚀 PRODUCTION DEPLOYMENT CHECKLIST
-# Car Reliability Analyzer - Full Stack Application
+# Car Reliability Analyzer - Full Stack Application (Railway)
 
 ## ✅ PRE-DEPLOYMENT VERIFICATION (ALL COMPLETE)
 
@@ -42,7 +42,7 @@
 - [x] Error handling implemented
 
 ### Deployment Configuration ✓
-- [x] render.yaml contains two services:
+- [x] railway.json contains two services:
   - car-dashboard-client (static)
   - car-dashboard-server (web service)
 - [x] All environment variables documented in env.example
@@ -56,7 +56,7 @@
 - [x] Proper error handling throughout
 
 
-## 📋 DEPLOYMENT STEPS ON RENDER
+## 📋 DEPLOYMENT STEPS ON RAILWAY
 
 ### PHASE 1: Google Cloud Setup (Prerequisites)
 
@@ -88,7 +88,7 @@
    - Create OAuth 2.0 Client ID (Web application)
    - Add Authorized JavaScript origins:
      * http://localhost:3000 (for local dev)
-     * https://your-app-name.onrender.com (will add after deployment)
+     * https://your-app-name.up.railway.app (will add after deployment)
    - Save Client ID (GOOGLE_OAUTH_CLIENT_ID)
 
 6. **Create Google Sheet**
@@ -106,7 +106,7 @@
      ```
 
 
-### PHASE 2: Deploy to Render
+### PHASE 2: Deploy to Railway
 
 1. **Push Code to GitHub**
    ```bash
@@ -115,28 +115,27 @@
    git push origin main
    ```
 
-2. **Create Render Account**
-   - Go to https://render.com
+2. **Create Railway Account**
+   - Go to https://railway.app
    - Sign up / Sign in
    - Connect your GitHub account
 
-3. **Deploy via Blueprint (Recommended)**
-   - Click "New" → "Blueprint"
+3. **Deploy via railway.json**
+   - Click "New Project" → "Deploy from GitHub repo"
    - Select your GitHub repository
-   - Render will auto-detect `render.yaml`
+   - Railway will auto-detect `railway.json`
    - Review the two services:
      * car-dashboard-client (Static Site)
      * car-dashboard-server (Web Service)
 
 4. **Set Environment Variables for SERVER**
    
-   In Render Dashboard → car-dashboard-server → Environment:
+   In Railway Dashboard → car-dashboard-server → Variables:
    
    ```
-   PORT=8000
+   PORT=8000 (Railway sets this automatically)
    
-   ALLOWED_ORIGINS=https://car-dashboard-client.onrender.com
-   (Note: Replace with your actual client URL after deployment)
+   ALLOWED_ORIGINS=* (or your specific client URL for production)
    
    GOOGLE_SHEET_ID=<your_sheet_id>
    
@@ -148,40 +147,34 @@
    GOOGLE_OAUTH_CLIENT_ID=<your_client_id>.apps.googleusercontent.com
    
    GOOGLE_OAUTH_AUDIENCE=<same_as_client_id>.apps.googleusercontent.com
-   
-   GLOBAL_DAILY_LIMIT=1000
-   USER_DAILY_LIMIT=5
-   CACHE_MAX_DAYS=45
-   
-   DATABASE_URL=(optional - leave empty unless using PostgreSQL)
    ```
 
 5. **Set Environment Variables for CLIENT**
    
-   In Render Dashboard → car-dashboard-client → Environment:
+   In Railway Dashboard → car-dashboard-client → Variables:
    
    ```
-   VITE_API_BASE_URL=https://car-dashboard-server.onrender.com
+   VITE_API_BASE_URL=https://car-dashboard-server-production.up.railway.app
    (Note: Replace with your actual server URL after deployment)
    
    VITE_GOOGLE_CLIENT_ID=<your_client_id>.apps.googleusercontent.com
    ```
 
 6. **Deploy Both Services**
-   - Render will automatically build and deploy both services
+   - Railway will automatically build and deploy both services
    - Wait for both deployments to complete (5-10 minutes)
    - Note the URLs:
-     * Client: https://car-dashboard-client.onrender.com
-     * Server: https://car-dashboard-server.onrender.com
+     * Client: https://car-dashboard-client-production.up.railway.app
+     * Server: https://car-dashboard-server-production.up.railway.app
 
 
 ### PHASE 3: Post-Deployment Configuration
 
 1. **Update CORS Origins**
-   - Go to Render → car-dashboard-server → Environment
+   - Go to Railway → car-dashboard-server → Variables
    - Update ALLOWED_ORIGINS with actual client URL:
      ```
-     ALLOWED_ORIGINS=https://car-dashboard-client.onrender.com
+     ALLOWED_ORIGINS=https://car-dashboard-client-production.up.railway.app
      ```
    - Save (this will trigger a redeploy)
 
@@ -190,31 +183,31 @@
    - Edit your OAuth 2.0 Client ID
    - Add to Authorized JavaScript origins:
      ```
-     https://car-dashboard-client.onrender.com
+     https://car-dashboard-client-production.up.railway.app
      ```
    - Save
 
 3. **Update Client API URL (if needed)**
    - If server URL is different than expected
    - Update VITE_API_BASE_URL in client environment
-   - Trigger manual deploy from Render dashboard
+   - Trigger manual deploy from Railway dashboard
 
 
 ### PHASE 4: Testing & Verification
 
 1. **Test Server Health**
    ```bash
-   curl https://car-dashboard-server.onrender.com/health
+   curl https://car-dashboard-server-production.up.railway.app/health
    # Expected: {"status":"healthy","timestamp":"..."}
    ```
 
 2. **Test API Documentation**
-   - Visit: https://car-dashboard-server.onrender.com/docs
+   - Visit: https://car-dashboard-server-production.up.railway.app/docs
    - Verify all endpoints are listed
    - Test /v1/quota endpoint
 
 3. **Test Client Application**
-   - Visit: https://car-dashboard-client.onrender.com
+   - Visit: https://car-dashboard-client-production.up.railway.app
    - Verify dashboard loads
    - Check quota display
    - Test each page:
@@ -258,7 +251,7 @@
 ### PHASE 5: Monitoring & Maintenance
 
 1. **Monitor Logs**
-   - Render Dashboard → car-dashboard-server → Logs
+   - Railway Dashboard → car-dashboard-server → Logs
    - Watch for errors or warnings
    - Check for failed API calls
 
@@ -297,22 +290,22 @@
    - Configure authorized origins
 
 ### During Deployment
-4. ✋ **Configure environment variables in Render**
+4. ✋ **Configure environment variables in Railway**
    - Copy all values from Google Cloud setup
    - Ensure GOOGLE_SERVICE_ACCOUNT_JSON is single line
    - Update URLs after initial deployment
 
 5. ✋ **Update CORS and OAuth origins**
-   - Add actual Render URLs to both configs
+   - Add actual Railway URLs to both configs
 
 ### Optional Enhancements
 6. 💡 **Custom Domain** (Optional)
    - Purchase domain
-   - Configure in Render
+   - Configure in Railway
    - Update ALLOWED_ORIGINS and OAuth origins
 
 7. 💡 **PostgreSQL Database** (Optional)
-   - Create Render PostgreSQL instance
+   - Create Railway PostgreSQL instance
    - Connect to server via DATABASE_URL
    - Implement leads storage in database
 
@@ -372,8 +365,8 @@ Your deployment is successful when:
 
 ## 🎉 YOU'RE DONE!
 
-Your Car Reliability Analyzer is now live in production!
+Your Car Reliability Analyzer is now live in production on Railway!
 
-Share the URL: https://car-dashboard-client.onrender.com
+Share the URL: https://car-dashboard-client-production.up.railway.app
 
 Enjoy! 🚗💨

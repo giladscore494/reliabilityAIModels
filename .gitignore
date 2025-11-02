@@ -79,3 +79,4 @@ htmlcov/
 *.db
 *.sqlite
 *.sqlite3
+DEPLOYMENT_CHECKLIST_RENDER_OLD.md
