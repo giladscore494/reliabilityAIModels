@@ -1,39 +1,41 @@
-services:
-  - name: car-dashboard-client
-    type: web
-    plan: free
-    env: static
-    rootDir: client
-    buildCommand: |
-      npm install
-      npm run build
-    staticPublishPath: client/dist
-    envVars:
-      - key: VITE_API_BASE_URL
-        sync: false
-      - key: VITE_GOOGLE_CLIENT_ID
-        sync: false
-
-  - name: car-dashboard-server
-    type: web
-    plan: free
-    rootDir: server
-    buildCommand: |
-      pip install -r requirements.txt
-    startCommand: |
-      uvicorn app:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: PORT
-        value: "8000"
-      - key: ALLOWED_ORIGINS
-        value: "*"
-      - key: GOOGLE_SHEET_ID
-        sync: false
-      - key: GOOGLE_SERVICE_ACCOUNT_JSON
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GOOGLE_OAUTH_CLIENT_ID
-        sync: false
-      - key: GOOGLE_OAUTH_AUDIENCE
-        sync: false
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "services": [
+    {
+      "name": "car-dashboard-client",
+      "sourceDir": "client",
+      "build": {
+        "builder": "NIXPACKS"
+      },
+      "deploy": {
+        "startCommand": "npm run preview",
+        "buildCommand": "npm install && npm run build"
+      },
+      "envVars": {
+        "VITE_API_BASE_URL": "https://car-dashboard-server-production.up.railway.app",
+        "VITE_GOOGLE_CLIENT_ID": "your-google-client-id"
+      }
+    },
+    {
+      "name": "car-dashboard-server",
+      "sourceDir": "server",
+      "build": {
+        "builder": "NIXPACKS",
+        "nixpacksPlan": "python"
+      },
+      "deploy": {
+        "startCommand": "uvicorn app:app --host 0.0.0.0 --port $PORT",
+        "buildCommand": "pip install -r requirements.txt"
+      },
+      "envVars": {
+        "PORT": "8000",
+        "ALLOWED_ORIGINS": "*",
+        "GOOGLE_SHEET_ID": "",
+        "GOOGLE_SERVICE_ACCOUNT_JSON": "",
+        "GEMINI_API_KEY": "",
+        "GOOGLE_OAUTH_CLIENT_ID": "",
+        "GOOGLE_OAUTH_AUDIENCE": ""
+      }
+    }
+  ]
+}
