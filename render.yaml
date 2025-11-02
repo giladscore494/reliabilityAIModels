@@ -17,9 +17,6 @@ services:
   - name: car-dashboard-server
     type: web
     plan: free
-    env:
-      - key: PORT
-        value: "8000"
     rootDir: server
     buildCommand: |
       cd server
@@ -28,6 +25,8 @@ services:
       cd server
       uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PORT
+        value: "8000"
       - key: ALLOWED_ORIGINS
         value: "*"
       - key: GOOGLE_SHEET_ID
