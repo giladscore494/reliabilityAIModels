@@ -1,7 +1,8 @@
 services:
   - name: car-dashboard-client
-    type: static
+    type: web
     plan: free
+    env: static
     rootDir: client
     buildCommand: |
       npm install
@@ -20,7 +21,7 @@ services:
     buildCommand: |
       pip install -r requirements.txt
     startCommand: |
-      uvicorn app:app --host 0.0.0.0 --port $PORT    
+      uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PORT
         value: "8000"
