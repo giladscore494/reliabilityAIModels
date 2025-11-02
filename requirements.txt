@@ -1,6 +1,0 @@
-streamlit
-pandas
-google-generativeai
-json-repair
-gspread
-google-auth
