@@ -1,6 +1,7 @@
 services:
   - name: car-dashboard-client
-    type: static
+    type: web
+    env: static
     plan: free
     buildCommand: |
       cd client
@@ -18,7 +19,7 @@ services:
     plan: free
     env:
       - key: PORT
-        value: 8000
+        value: "8000"
     rootDir: server
     buildCommand: |
       cd server
