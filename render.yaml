@@ -1,7 +1,6 @@
 services:
   - name: car-dashboard-client
     type: web
-    runtime: node
     plan: free
     rootDir: client
     buildCommand: |
@@ -16,7 +15,6 @@ services:
 
   - name: car-dashboard-server
     type: web
-    runtime: python3
     plan: free
     rootDir: server
     buildCommand: |
